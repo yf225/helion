@@ -1,0 +1,16 @@
+{
+  "site_package_search_strategy": "pep561",
+  "source_directories": [
+    {
+      "import_root": ".",
+      "source": "helion"
+    }
+  ],
+  "python_version": "3.9",
+  "search_path": [
+      "../pytorch",
+      {"site-package": "sympy"}
+  ],
+  "exclude": [".*third_party.*"],
+  "strict": true
+}
