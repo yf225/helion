@@ -6,13 +6,18 @@ import traceback
 import typing
 from typing import TYPE_CHECKING
 from typing import Protocol
+from typing import TypeVar
 
 if TYPE_CHECKING:
     import ast
     from typing_extensions import Self
 
+    from .ast_extension import ExtendedAST
+
     class _TLS(Protocol):
         locations: list[SourceLocation]
+
+    _T = TypeVar("_T", ast.AST, ExtendedAST)
 
 
 # pyre-ignore-all-errors[16, 28]: lineno/colno/etc are not defined
@@ -56,7 +61,7 @@ class SourceLocation(traceback.FrameSummary):
             name=code.co_name,
         )
 
-    def to_ast(self, node: ast.AST) -> ast.AST:
+    def to_ast(self, node: _T) -> _T:
         if "lineno" in node._attributes:
             node.lineno = self.lineno
             node.col_offset = self.colno
@@ -124,12 +129,6 @@ class UnknownLocation(SourceLocation):
 
     def format(self) -> str:
         return "unknown location"
-
-    def __enter__(self) -> None:
-        pass
-
-    def __exit__(self, *args: object) -> None:
-        pass
 
     def __bool__(self) -> bool:
         return False

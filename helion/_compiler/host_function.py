@@ -9,6 +9,8 @@ from typing import Protocol
 
 from . import ast_extension
 from .compile_environment import CompileEnvironment
+from .source_location import SourceLocation
+from .source_location import UnknownLocation
 from .type_printer import print_ast
 
 if TYPE_CHECKING:
@@ -26,6 +28,7 @@ class HostFunction:
         super().__init__()
         self.fn = fn
         self.env = env
+        self.location: SourceLocation = UnknownLocation()
         with self:
             source = inspect.getsource(fn)
             root = ast.parse(source)
@@ -60,8 +63,10 @@ class HostFunction:
             tls.functions.append(self)
         except AttributeError:
             tls.functions = [self]
+        self.location.__enter__()
 
     def __exit__(self, *args: object) -> None:
+        self.location.__exit__(*args)
         tls.functions.pop()
 
     @staticmethod

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections import defaultdict
 import functools
 import re
 import sys
 from typing import TYPE_CHECKING
 from typing import Callable
 
+from .. import exc
 from ..exc import Base
 from ..exc import BaseError
 from ..exc import BaseWarning
@@ -13,6 +15,9 @@ from ..exc import ErrorCompilingKernel
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from .source_location import SourceLocation
+    from .type_propagation import TypeNotAllowedOnDevice
 
     ErrorOrWarning = BaseError | BaseWarning
 
@@ -27,22 +32,32 @@ class ErrorReporting:
     def __init__(self) -> None:
         self.errors: list[BaseError] = []
         self.warnings: list[BaseWarning] = []
-        self.ignores: dict[type[BaseWarning], bool] = {}
+        self.ignores: tuple[type[BaseWarning], ...] = ()
+        self.type_errors: dict[SourceLocation, list[exc.TypePropagationError]] = (
+            defaultdict(list)
+        )
 
     def add(self, e: Base | type[Base]) -> None:
         if callable(e):
             e = e()
         if isinstance(e, BaseError):
-            breakpoint()
             self.errors.append(e)
         elif isinstance(e, BaseWarning):
-            if not self.ignores.get(type(e)):
+            if not isinstance(e, self.ignores):
                 self.warnings.append(e)
         else:
             raise TypeError(f"expected error or warning, got {type(e)}")
 
+    def add_type_error(
+        self, locations: list[SourceLocation], type_info: TypeNotAllowedOnDevice
+    ) -> None:
+        similar_errors = self.type_errors[locations[0]]
+        similar_errors.append(e := exc.TypePropagationError(type_info, similar_errors))
+        if len(similar_errors) == 1:
+            self.add(e)
+
     def ignore(self, e: type[BaseWarning]) -> None:
-        self.ignores[e] = True
+        self.ignores = (*self.ignores, e)
 
     def raise_if_errors(self) -> None:
         sys.stderr.write(self.report())

@@ -6,18 +6,23 @@ import contextlib
 import dataclasses
 import functools
 import inspect
-import itertools
 import types
 from typing import TYPE_CHECKING
 from typing import Callable
 from typing import NoReturn
 from typing import Protocol
+from typing import TypeVar
 
 import sympy
 import torch
+from torch._inductor.decomposition import select_decomp_table
+from torch.fx.experimental.proxy_tensor import make_fx
 
 from .. import exc
+from ..language._decorators import is_api_func
 from .ast_extension import ExtendedAST
+from .ast_extension import LoopType
+from .compile_environment import CompileEnvironment
 from .compile_environment import warning
 from .source_location import SourceLocation
 from .source_location import current_location
@@ -35,12 +40,17 @@ from .variable_origin import SourceOrigin
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from collections.abc import Sequence
+    from typing_extensions import Self
+
+    from torch.fx import GraphModule
 
     from .host_function import HostFunction
 
     class _VisitMethod(Protocol):
         @staticmethod
         def __call__(self: object, node: ast.AST) -> TypeInfo: ...
+
+    _T = TypeVar("_T")
 
 
 class Scope:
@@ -65,6 +75,7 @@ class GlobalScope(Scope):
         origin = GlobalOrigin(name=name, function=self.function)
         try:
             # TODO(jansel): record global access and maybe specialize
+            # TODO(jansel): make this not specialize int/float/bool
             value = self.function.fn.__globals__[name]
         except KeyError:
             if hasattr(builtins, name):
@@ -143,24 +154,19 @@ class TypeInfo:
         self.origin = origin
 
     @classmethod
-    def from_example(
-        cls, value: object, origin: Origin, *, specialize: bool = False
-    ) -> TypeInfo:
+    def from_example(cls, value: object, origin: Origin) -> TypeInfo:
         if isinstance(value, torch.Tensor):
             # TODO(jansel): need to wrap this in a fake tensor
             # TODO(jansel): tensor subclass support
             return TensorType(origin, fake_value=value)
+        if isinstance(value, torch.SymBool):
+            return SymBoolType(origin, value)
         if isinstance(value, torch.SymInt):
-            if isinstance(value._sympy_(), (int, sympy.Integer)):
-                return cls.from_example(
-                    int(value._sympy_()), origin, specialize=specialize
-                )
             return SymIntType(origin, value)
-        if type(value) in (int, float, bool):
-            if specialize:
-                return LiteralType(origin, value)
-            # pyre-ignore[6]
-            return NumericType(origin, type(value))
+        if isinstance(value, torch.SymFloat):
+            return SymFloatType(origin, value)
+        if type(value) in (int, float, bool, type(None), range):
+            return LiteralType(origin, value)
         if type(value) in (str, torch.dtype, torch.device):
             # TODO(jansel): track specializations
             return LiteralType(origin, value)
@@ -179,7 +185,7 @@ class TypeInfo:
                 tuple(cls._unpack_example(enumerate(value), origin)),
             )
         if type(value) is torch.Size:
-            return cls.from_example(tuple(value), origin, specialize=specialize)
+            return cls.from_example(tuple(value), origin)
         if type(value) is dict:
             # TODO(jansel): track specializations
             if not all(type(key) in (str, int) for key in value):
@@ -210,8 +216,8 @@ class TypeInfo:
     def __str__(self) -> str:
         return type(self).__name__
 
-    def debug_annotation(self) -> str:
-        return f"{self!s} {self.origin!r}"
+    def debug_annotations(self) -> list[str]:
+        return [f"{self!s} {self.origin!r}"]
 
     def merge(self, other: TypeInfo) -> TypeInfo:
         """Combine two types at a join point in control flow."""
@@ -229,16 +235,6 @@ class TypeInfo:
             debug_msg=f"{type(op).__name__} not supported on {self!s}",
             origin=origin,
         )
-
-    def propagate_host_call(
-        self, args: tuple[TypeInfo, ...], kwargs: dict[str, TypeInfo], origin: Origin
-    ) -> TypeInfo:
-        return self.propagate_call(args, kwargs, origin)
-
-    def propagate_device_call(
-        self, args: tuple[TypeInfo, ...], kwargs: dict[str, TypeInfo], origin: Origin
-    ) -> TypeInfo:
-        return self.propagate_call(args, kwargs, origin)
 
     def propagate_call(
         self, args: tuple[TypeInfo, ...], kwargs: dict[str, TypeInfo], origin: Origin
@@ -259,7 +255,14 @@ class TypeInfo:
     ) -> TypeInfo:
         """Should return updated type of self after running `self[key] = value`"""
         return UnknownType(
-            debug_msg=f"SetItem not supported with self={self!s} key={key!s} value={value!s}",
+            debug_msg=f"Subscript assignment not supported with self={self!s} key={key!s} value={value!s}",
+            origin=origin,
+        )
+
+    def propagate_getitem(self, key: TypeInfo, origin: Origin) -> TypeInfo:
+        """Should return updated type of self after running `self[key] = value`"""
+        return UnknownType(
+            debug_msg=f"Subscript not supported with self={self!s} key={key!s}",
             origin=origin,
         )
 
@@ -281,7 +284,7 @@ class TypeInfo:
     def unpack(self) -> list[TypeInfo]:
         raise NotImplementedError
 
-    def example_value(self) -> object:
+    def proxy(self) -> object:
         raise NotImplementedError
 
     def truth_value(self) -> bool:
@@ -298,13 +301,30 @@ class TensorType(TypeInfo):
         super().__init__(origin)
         self.fake_value = fake_value
 
-    def example_value(self) -> object:
+    def __str__(self) -> str:
+        shape = []
+        for s in self.fake_value.size():
+            if isinstance(s, torch.SymInt):
+                shape.append(
+                    str(
+                        s._sympy_().xreplace(
+                            CompileEnvironment.current().debug_shape_renames
+                        )
+                    )
+                )
+            else:
+                shape.append(str(s))
+        dtype = self.fake_value.dtype
+        return f"{type(self).__name__}([{', '.join(shape)}], {dtype})"
+
+    def proxy(self) -> torch.Tensor:
         return self.fake_value
 
     def propagate_unary(self, op: ast.unaryop, origin: Origin) -> TypeInfo:
-        warning(exc.TensorOperationInWrapper)
+        if origin.is_host():
+            warning(exc.TensorOperationInWrapper)
         if isinstance(op, ast.Not):
-            return NumericType(origin, bool)
+            return SymBoolType.new_unbacked(origin)
         try:
             return TypeInfo.from_example(_eval_unary(op, self.fake_value), origin)
         except Exception as e:
@@ -316,12 +336,80 @@ class TensorType(TypeInfo):
             return TypeInfo.from_example(getattr(self.fake_value, attr), origin)
         return TensorAttributeType(origin, self)
 
+    def _device_indexing_size(self, key: TypeInfo) -> list[int | torch.SymInt]:
+        if isinstance(key, SequenceType):
+            keys = key.unpack()
+        else:
+            keys = [key]
+        inputs_consumed = 0
+        output_sizes = []
+        env = CompileEnvironment.current()
+        for k in keys:
+            if isinstance(k, LiteralType):
+                if isinstance(k.value, (int, torch.SymInt)):
+                    inputs_consumed += 1
+                elif k.value is None:
+                    output_sizes.append(1)
+                else:
+                    raise exc.InvalidIndexingType(k)
+            elif isinstance(k, SliceType):
+                length = self.fake_value.size(inputs_consumed)
+                start = k.lower.proxy()
+                if start is None:
+                    start = 0
+                elif start < 0:
+                    start = start + length
+                if start < 0:
+                    start = 0
+                stop = k.upper.proxy()
+                if stop is None:
+                    stop = length
+                elif stop < 0:
+                    stop = stop + length
+                if stop > length:
+                    stop = length
+                step = k.step.proxy()
+                if step is None:
+                    step = 1
+                inputs_consumed += 1
+                output_sizes.append((stop - start) // step)
+            elif isinstance(k, TileIndexType):
+                inputs_consumed += 1
+                output_sizes.append(env.block_size_vars[k.block_size_idx])
+            else:
+                raise exc.InvalidIndexingType(k)
+        if inputs_consumed != self.fake_value.ndim:
+            raise exc.RankMismatch(self.fake_value.ndim, inputs_consumed)
+        return output_sizes
+
     def propagate_setitem(
         self, key: TypeInfo, value: TypeInfo, origin: Origin
     ) -> TypeInfo:
         if origin.is_host():
             warning(exc.TensorOperationInWrapper)
+        else:
+            lhs_rank = len(self._device_indexing_size(key))
+            if isinstance(value, TensorType):
+                rhs_rank = value.fake_value.ndim
+                if lhs_rank != rhs_rank:
+                    raise exc.RankMismatch(lhs_rank, rhs_rank)
+            else:
+                raise exc.RequiresTensorInAssignment(value)
         return self
+
+    def propagate_getitem(self, key: TypeInfo, origin: Origin) -> TypeInfo:
+        if origin.is_host():
+            try:
+                # pyre-ignore[6]
+                return TypeInfo.from_example(self.fake_value[key.proxy()], origin)
+            except NotImplementedError:
+                return UnknownType(
+                    origin,
+                    f"Subscript not supported on {self!s} with key={key!s}",
+                )
+        return TensorType(
+            origin, self.fake_value.new_empty(self._device_indexing_size(key))
+        )
 
     def merge(self, other: TypeInfo) -> TypeInfo:
         if isinstance(other, TensorType):
@@ -394,52 +482,61 @@ class LiteralType(TypeInfo):
     def python_type(self) -> type[object]:
         return type(self.value)
 
-    def example_value(self) -> object:
+    def proxy(self) -> object:
         return self.value
 
     def propagate_unary(self, op: ast.unaryop, origin: Origin) -> TypeInfo:
         return TypeInfo.from_example(
             _eval_unary(op, self.value),
             origin,
-            specialize=True,
         )
 
     def propagate_attribute(self, attr: str, origin: AttributeOrigin) -> TypeInfo:
-        return TypeInfo.from_example(getattr(self.value, attr), origin, specialize=True)
+        return TypeInfo.from_example(getattr(self.value, attr), origin)
+
+    def propagate_getitem(self, key: TypeInfo, origin: Origin) -> TypeInfo:
+        try:
+            # pyre-ignore[16]
+            return TypeInfo.from_example(self.value[key.as_literal()], origin)
+        except NotImplementedError:
+            pass
+        return super().propagate_getitem(key, origin)
 
     def truth_value(self) -> bool:
         return bool(self.value)
 
     def merge(self, other: TypeInfo) -> TypeInfo:
-        if isinstance(other, LiteralType) and self.value == other.value:
-            return self
         if isinstance(other, (LiteralType, NumericType)):
-            if self.python_type == other.python_type:
-                # pyre-ignore[6]
-                return NumericType(other.origin, self.python_type)
+            if NumericType.known_equal(other.value, self.value):
+                return self
+            if self.python_type == other.python_type and self.python_type in (
+                int,
+                float,
+                bool,
+            ):
+                return NumericType.subtype(self.python_type).new_unbacked(self.origin)
         return super().merge(other)
 
     def unpack(self) -> list[TypeInfo]:
-        # pyre-ignore[6]
-        it = iter(self.value)
-        return [TypeInfo.from_example(x, self.origin, specialize=True) for x in it]
+        try:
+            # pyre-ignore[6]
+            it = iter(self.value)
+        except TypeError:
+            return super().unpack()
+        return [TypeInfo.from_example(x, self.origin) for x in it]
 
     def as_literal(self) -> object:
         return self.value
 
 
-# pyre-ignore[36]
-_constant_prop_functions: dict[Callable[..., object], None] = dict.fromkeys(
-    [abs, all, any, str, int, list, dict, tuple, float],
-)
-
-
 class CallableType(LiteralType):
     value: Callable[..., object]
+    graph: GraphModule | None = None
 
     def __init__(self, origin: Origin, value: Callable[..., object]) -> None:
         super().__init__(origin, value)
         self.value = value
+        self.graph = None
 
     def __str__(self) -> str:
         try:
@@ -451,54 +548,93 @@ class CallableType(LiteralType):
                 name = str(self.value)
         return f"{type(self).__name__}({name})"
 
-    def _propagate_call(
+    def debug_annotations(self) -> list[str]:
+        result = [*super().debug_annotations()]
+        if self.graph:
+            result.extend(str(self.graph.graph).splitlines())
+        return result
+
+    def propagate_call(
         self, args: tuple[TypeInfo, ...], kwargs: dict[str, TypeInfo], origin: Origin
     ) -> TypeInfo | None:
-        if self.value in _constant_prop_functions and all(
-            isinstance(arg, LiteralType)
-            for arg in itertools.chain(args, kwargs.values())
-        ):
-            return TypeInfo.from_example(
+        if is_api_func(fn := self.value):
+            if fn._is_device_only and origin.is_host():
+                raise exc.DeviceAPIOnHost(fn.__qualname__)
+            assert fn._type_function is not None
+            return fn._type_function(*args, **kwargs, origin=origin)
+
+        # TODO(jansel): support no-tracing mode
+
+        tensor_inputs = False
+        proxy_args = []
+        proxy_kwargs = {}
+        for i, arg in enumerate(args):
+            tensor_inputs = tensor_inputs or isinstance(arg, TensorType)
+            try:
+                proxy_args.append(arg.proxy())
+            except NotImplementedError:
+                return UnknownType(
+                    origin,
+                    f"Argument {i} ({arg!s}) cannot be converted to proxy",
+                    chained_from=arg,
+                )
+        for key, arg in kwargs.items():
+            tensor_inputs = tensor_inputs or isinstance(arg, TensorType)
+            try:
+                proxy_kwargs[key] = arg.proxy()
+            except NotImplementedError:
+                return UnknownType(
+                    origin,
+                    f"Argument {key} ({arg!s}) cannot be converted to proxy",
+                    chained_from=arg,
+                )
+
+        try:
+            output_type = TypeInfo.from_example(
                 self.value(
-                    # pyre-ignore[16]
-                    *[arg.value for arg in args],
-                    **{key: arg.value for key, arg in kwargs.items()},
+                    *proxy_args,
+                    **proxy_kwargs,
                 ),
                 origin,
-                specialize=True,
             )
-        if self.value in (list, tuple) and len(kwargs) == 0:
-            if len(args) == 0:
-                # pyre-ignore[6]
-                return SequenceType(origin, self.value())
-            if len(args) == 1 and isinstance(arg0 := args[0], SequenceType):
-                # pyre-ignore[6]
-                return SequenceType(origin, self.value(arg0.element_types))
-        if self.value is dict:
-            if len(args) == 0:
-                # pyre-ignore[6]
-                return DictType(origin, kwargs)
-            if not kwargs and len(args) == 1 and isinstance(arg0 := args[0], DictType):
-                # pyre-ignore[6]
-                return DictType(origin, self.value(arg0.element_types))
-            return None
-        return None
+            if isinstance(output_type, UnknownType) or (
+                origin.is_host()
+                and not isinstance(output_type, TensorType)
+                and not tensor_inputs
+            ):
+                return output_type
 
-    def propagate_host_call(
-        self, args: tuple[TypeInfo, ...], kwargs: dict[str, TypeInfo], origin: Origin
-    ) -> TypeInfo:
-        rv = self._propagate_call(args, kwargs, origin)
-        if rv is not None:
-            return rv
-        return UnknownType(debug_msg="TODO", origin=origin)
+            if proxy_kwargs:
+                bound = inspect.signature(self.value).bind(*proxy_args, **proxy_kwargs)
+                bound.apply_defaults()
+                proxy_args = [*bound.arguments.values()]
+                del proxy_kwargs
 
-    def propagate_device_call(
-        self, args: tuple[TypeInfo, ...], kwargs: dict[str, TypeInfo], origin: Origin
-    ) -> TypeInfo:
-        rv = self._propagate_call(args, kwargs, origin)
-        if rv is not None:
-            return rv
-        return UnknownType(debug_msg="TODO", origin=origin)
+            # TODO(jansel): lift closures
+            self.graph = make_fx(self.value, decomposition_table=select_decomp_table())(
+                *proxy_args
+            )
+            if origin.is_host():
+                self._warn_graph_contains_disallowed_host_ops()
+            return output_type
+        except Exception as e:
+            # TODO(jansel): point to other tracing modes
+            raise exc.TorchOpTracingError(e) from e
+
+    def _warn_graph_contains_disallowed_host_ops(self) -> None:
+        graph = self.graph
+        assert graph is not None
+        for node in graph.graph.nodes:
+            if node.op == "call_function":
+                opname = getattr(node.target, "_opname", "")
+                if opname not in {
+                    "",
+                    "sym_size",
+                    "empty",
+                    "full",
+                    "permute",
+                }:
+                    warning(exc.TensorOperationsInHostCall(opname))
 
 
 class PythonModuleType(LiteralType):
@@ -513,46 +649,177 @@ class PythonModuleType(LiteralType):
 
 
 class NumericType(TypeInfo):
-    python_type: type[float | int | bool]
+    value: torch.SymInt | torch.SymBool | torch.SymFloat
 
-    def __init__(self, origin: Origin, python_type: type[float | int | bool]) -> None:
+    def __init__(
+        self, origin: Origin, value: torch.SymInt | torch.SymBool | torch.SymFloat
+    ) -> None:
         super().__init__(origin)
-        self.python_type = python_type
+        self.value = value
+
+    @property
+    def python_type(self) -> type[float | int | bool]:
+        raise NotImplementedError
 
     def __str__(self) -> str:
-        return self.python_type.__name__
+        return f"{type(self).__name__}({self.value})"
 
-    def example_value(self) -> object:
-        return {int: 0, float: 0.0, bool: False}[self.python_type]
+    def proxy(self) -> torch.SymInt | torch.SymBool | torch.SymFloat:
+        return self.value
 
     def propagate_unary(self, op: ast.unaryop, origin: Origin) -> TypeInfo:
-        # pyre-ignore[6]
-        return NumericType(origin, type(_eval_unary(op, self.example_value())))
+        return TypeInfo.from_example(_eval_unary(op, self.value), self.origin)
 
     def merge(self, other: TypeInfo) -> TypeInfo:
         if isinstance(other, (LiteralType, NumericType)):
+            if NumericType.known_equal(self.value, other.value):
+                return self
             if self.python_type == other.python_type:
-                return NumericType(self.origin, self.python_type)
+                return self.new_unbacked(self.origin)
         return super().merge(other)
+
+    @staticmethod
+    def subtype(
+        python_type: type[float | int | bool],
+    ) -> type[NumericType]:
+        return _numeric_types[python_type]
+
+    @staticmethod
+    def known_equal(left: object, right: object) -> bool:
+        """Check if two are equal without introducing guards"""
+        if isinstance(left, (NumericType, LiteralType)):
+            left = left.value
+        if isinstance(right, (NumericType, LiteralType)):
+            right = right.value
+
+        if isinstance(left, (int, float, bool)) and isinstance(
+            right, (int, float, bool)
+        ):
+            return left == right
+
+        if isinstance(left, (torch.SymInt | torch.SymBool | torch.SymFloat)):
+            vleft = left._sympy_()
+        elif isinstance(right, int | float | bool):
+            vleft = sympy.sympify(left)
+        else:
+            return False
+
+        if isinstance(right, (torch.SymInt | torch.SymBool | torch.SymFloat)):
+            vright = right._sympy_()
+        elif isinstance(right, int | float | bool):
+            vright = sympy.sympify(right)
+        else:
+            return False
+
+        try:
+            static_expr = CompileEnvironment.current().shape_env._maybe_evaluate_static(
+                sympy.Eq(vleft, vright)
+            )
+            if static_expr is not None:
+                return bool(static_expr)
+        except TypeError:
+            pass
+        return False
+
+    @classmethod
+    def new_unbacked(cls, origin: Origin) -> Self:
+        raise NotImplementedError
 
 
 class SymIntType(NumericType):
     value: torch.SymInt
 
-    def __init__(self, origin: Origin, value: torch.SymInt) -> None:
-        super().__init__(origin, int)
-        self.value = value
+    @classmethod
+    def new_unbacked(cls, origin: Origin) -> Self:
+        shape_env = CompileEnvironment.current().shape_env
+        with shape_env.ignore_fresh_unbacked_symbols():
+            return cls(
+                origin,
+                shape_env.create_unbacked_symint(),
+            )
 
-    def __str__(self) -> str:
-        return f"{type(self).__name__}({self.value})"
+    @property
+    def python_type(self) -> type[int]:
+        return int
+
+
+class SymFloatType(NumericType):
+    value: torch.SymFloat
+
+    @classmethod
+    def new_unbacked(cls, origin: Origin) -> Self:
+        shape_env = CompileEnvironment.current().shape_env
+        with shape_env.ignore_fresh_unbacked_symbols():
+            return cls(
+                origin,
+                shape_env.create_unbacked_symfloat(),
+            )
+
+    @property
+    def python_type(self) -> type[float]:
+        return float
+
+
+class SymBoolType(NumericType):
+    value: torch.SymBool
+
+    @classmethod
+    def new_unbacked(cls, origin: Origin) -> Self:
+        shape_env = CompileEnvironment.current().shape_env
+        with shape_env.ignore_fresh_unbacked_symbols():
+            return cls(
+                origin,
+                shape_env.create_unbacked_symbool(),
+            )
+
+    @property
+    def python_type(self) -> type[bool]:
+        return bool
+
+
+_numeric_types: dict[type[object], type[NumericType]] = {
+    int: SymIntType,
+    float: SymFloatType,
+    bool: SymBoolType,
+}
+
+
+class TileIndexType(TypeInfo):
+    block_size_idx: int
+
+    def __init__(self, origin: Origin, block_size_idx: int) -> None:
+        super().__init__(origin)
+        self.block_size_idx = block_size_idx
+
+    @staticmethod
+    def allocate(numel: int | torch.SymInt, origin: Origin) -> TileIndexType:
+        return TileIndexType(
+            origin, CompileEnvironment.current().allocate_block_size(numel)
+        )
 
     def merge(self, other: TypeInfo) -> TypeInfo:
-        if (
-            isinstance(other, SymIntType)
-            and self.value._sympy_() == other.value._sympy_()
-        ):
-            return self
+        if isinstance(other, TileIndexType):
+            if self.block_size_idx == other.block_size_idx:
+                return self
+            return UnknownType(
+                debug_msg=f"TileIndexType mismatch in control flow: {self.block_size_idx} and {other.block_size_idx}",
+                origin=other.origin,
+            )
         return super().merge(other)
+
+
+class IterType(TypeInfo):
+    inner: TypeInfo
+
+    def __init__(self, origin: Origin, inner: TypeInfo) -> None:
+        super().__init__(origin)
+        self.inner = inner
+
+    def __str__(self) -> str:
+        return f"{type(self).__name__}({self.inner!s})"
+
+    def propagate_iter(self, origin: Origin) -> TypeInfo:
+        return self.inner
 
 
 class NoType(TypeInfo):
@@ -561,19 +828,22 @@ class NoType(TypeInfo):
     def merge(self, other: TypeInfo) -> TypeInfo:
         return other
 
-    def debug_annotation(self) -> str:
-        return ""
+    def debug_annotations(self) -> list[str]:
+        return []
 
 
 class CollectionType(TypeInfo):
-    element_types: list[TypeInfo] | tuple[TypeInfo, ...] | dict[str | int, TypeInfo]
+    element_types: (
+        list[TypeInfo] | tuple[TypeInfo, ...] | dict[str | int, TypeInfo] | slice
+    )
 
     def __init__(
         self,
         origin: Origin,
         element_types: list[TypeInfo]
         | tuple[TypeInfo, ...]
-        | dict[str | int, TypeInfo],
+        | dict[str | int, TypeInfo]
+        | slice,
     ) -> None:
         super().__init__(origin)
         self.element_types = element_types
@@ -602,6 +872,24 @@ class CollectionType(TypeInfo):
                     elements[k] = value
                 return self
         return super().propagate_setitem(key, value, origin)
+
+    def propagate_getitem(self, key: TypeInfo, origin: Origin) -> TypeInfo:
+        try:
+            literal_key = key.as_literal()
+        except NotImplementedError:
+            pass
+        else:
+            try:
+                # pyre-ignore[16]
+                result = self.element_types[literal_key]
+            except (KeyError, IndexError) as e:
+                return UnknownType(origin, f"{type(e).__name__}: {e}")
+            if isinstance(result, LiteralType):
+                return result
+            if type(result) is self.python_type:  # sliced!
+                # pyre-ignore[6]
+                return type(self)(origin=origin, element_types=result)
+        return super().propagate_getitem(key, origin)
 
     def merge(self, other: TypeInfo) -> TypeInfo:
         if isinstance(other, CollectionType):
@@ -634,22 +922,6 @@ class CollectionType(TypeInfo):
     def truth_value(self) -> bool:
         return bool(self.element_types)
 
-    def unpack(self) -> list[TypeInfo]:
-        if isinstance(self.element_types, dict):
-            return [
-                TypeInfo.from_example(k, self.origin, specialize=True)
-                for k in self.element_types
-            ]
-        assert isinstance(self.element_types, (list, tuple))
-        return [*self.element_types]
-
-    def as_literal(self) -> object:
-        if isinstance(self.element_types, dict):
-            return {k: v.as_literal() for k, v in self.element_types.items()}
-        assert isinstance(self.element_types, (list, tuple))
-        # pyre-ignore[19]
-        return self.python_type([x.as_literal() for x in self.element_types])
-
 
 class SequenceType(CollectionType):
     element_types: list[TypeInfo] | tuple[TypeInfo, ...]
@@ -661,6 +933,20 @@ class SequenceType(CollectionType):
         items = ", ".join(map(str, self.element_types))
         return f"{type(self).__name__}({start}{items}{end})"
 
+    def _maybe_tuple(self, x: list[_T]) -> tuple[_T, ...] | list[_T]:
+        if isinstance(self.element_types, tuple):
+            return tuple(x)
+        return x
+
+    def proxy(self) -> list[object] | tuple[object, ...]:
+        return self._maybe_tuple([x.proxy() for x in self.element_types])
+
+    def as_literal(self) -> list[object] | tuple[object, ...]:
+        return self._maybe_tuple([x.as_literal() for x in self.element_types])
+
+    def unpack(self) -> list[TypeInfo]:
+        return [*self.element_types]
+
 
 class DictType(CollectionType):
     element_types: dict[str | int, TypeInfo]
@@ -669,16 +955,65 @@ class DictType(CollectionType):
         items = ", ".join(f"{k!r}: {v!s}" for k, v in self.element_types.items())
         return f"{type(self).__name__}({{{items}}})"
 
+    def proxy(self) -> dict[str | int, object]:
+        return {k: v.proxy() for k, v in self.element_types.items()}
+
+    def as_literal(self) -> dict[str | int, object]:
+        return {k: v.as_literal() for k, v in self.element_types.items()}
+
+    def unpack(self) -> list[TypeInfo]:
+        return [TypeInfo.from_example(k, self.origin) for k in self.element_types]
+
+
+class SliceType(CollectionType):
+    element_types: slice
+
+    @property
+    def lower(self) -> TypeInfo:
+        return self.element_types.start
+
+    @property
+    def upper(self) -> TypeInfo:
+        return self.element_types.stop
+
+    @property
+    def step(self) -> TypeInfo:
+        return self.element_types.step
+
+    def __str__(self) -> str:
+        return f"{type(self).__name__}({self.lower!s}:{self.upper!s}:{self.step!s})"
+
+    def proxy(self) -> slice:
+        return slice(self.lower.proxy(), self.upper.proxy(), self.step.proxy())
+
+    def as_literal(self) -> slice:
+        return slice(
+            self.lower.as_literal(), self.upper.as_literal(), self.step.as_literal()
+        )
+
+    def unpack(self) -> list[TypeInfo]:
+        return [self.lower, self.upper, self.step]
+
 
 class TypeNotAllowedOnDevice(TypeInfo):
-    pass
+    locations: list[SourceLocation]
+
+    def __init__(self, origin: Origin) -> None:
+        super().__init__(origin)
+        self.locations = [current_location()]
 
 
 class UnknownType(TypeNotAllowedOnDevice):
-    def __init__(self, origin: Origin, debug_msg: str) -> None:
+    def __init__(
+        self, origin: Origin, debug_msg: str, *, chained_from: TypeInfo | None = None
+    ) -> None:
         super().__init__(origin)
-        self.locations: list[SourceLocation] = [current_location()]
         self.debug_msg: str = debug_msg
+        if isinstance(chained_from, UnknownType):
+            self.locations: list[SourceLocation] = [
+                *chained_from.locations,
+                *self.locations,
+            ]
 
     def __str__(self) -> str:
         return f"{type(self).__name__}({self.debug_msg!r})"
@@ -714,8 +1049,9 @@ class ChainedUnknownType(UnknownType):
     """Keep track of multiple locations for an operation that is already unknown type."""
 
     def __init__(self, origin: Origin, prior_type: UnknownType) -> None:
-        super().__init__(origin=origin, debug_msg=prior_type.debug_msg)
-        self.locations: list[SourceLocation] = [*prior_type.locations, *self.locations]
+        super().__init__(
+            origin=origin, debug_msg=prior_type.debug_msg, chained_from=prior_type
+        )
 
 
 def _eval_unary(op: ast.unaryop, value: object) -> object:
@@ -826,6 +1162,7 @@ class TypePropagation(ast.NodeVisitor):
         self.func = func
         self.scope = scope
         self.device_loop_depth = 0
+        self.device_loop_count = 0
 
     def push_scope(self) -> None:
         self.scope = LocalScope(parent=self.scope)
@@ -871,6 +1208,10 @@ class TypePropagation(ast.NodeVisitor):
                 assert isinstance(type_info, TypeInfo), (
                     f"expected TypeInfo, got {type_info!r} from {visitor!r}"
                 )
+                if self.device_loop_depth > 0 and isinstance(
+                    type_info, TypeNotAllowedOnDevice
+                ):
+                    CompileEnvironment.current().errors.add_type_error(type_info)
                 return node.update_type_info(type_info)
             except exc.Base:
                 raise
@@ -892,25 +1233,23 @@ class TypePropagation(ast.NodeVisitor):
     def _bool_op(self, op: ast.boolop, left: TypeInfo, right: TypeInfo) -> TypeInfo:
         try:
             val = left.truth_value()
-            if isinstance(op, ast.Or):
-                val = not val
-            if val:
+            if isinstance(op, ast.Or) and val is False:
                 return left
-            return right
+            if isinstance(op, ast.And) and val is True:
+                return right
         except NotImplementedError:
             pass
         if (
-            isinstance(left, NumericType)
-            and isinstance(right, NumericType)
+            isinstance(left, (NumericType, LiteralType))
+            and isinstance(right, (NumericType, LiteralType))
             and left.python_type == right.python_type
+            and (pt := left.python_type) in (int, float, bool)
         ):
-            return NumericType(origin=self.origin(), python_type=left.python_type)
-
+            return NumericType.subtype(pt).new_unbacked(self.origin())
         if isinstance(left, UnknownType):
             return left.chained(self.origin())
         if isinstance(right, UnknownType):
             return right.chained(self.origin())
-
         return UnknownType(
             debug_msg=f"{type(op).__name__} not supported on {left!s} and {right!s}",
             origin=self.origin(),
@@ -935,13 +1274,13 @@ class TypePropagation(ast.NodeVisitor):
             right,
             (NumericType, LiteralType),
         ):
-            return NumericType(origin=self.origin(), python_type=bool)
+            return SymBoolType.new_unbacked(self.origin())
         if isinstance(op, CMP_ALWAYS_BOOL):
-            return NumericType(origin=self.origin(), python_type=bool)
+            return SymBoolType.new_unbacked(self.origin())
         if isinstance(left, TensorType) or isinstance(right, TensorType):
             try:
-                left_example = left.example_value()
-                right_example = right.example_value()
+                left_example = left.proxy()
+                right_example = right.proxy()
             except NotImplementedError:
                 pass
             else:
@@ -1008,6 +1347,8 @@ class TypePropagation(ast.NodeVisitor):
         if isinstance(lhs, ast.Subscript):
             # TODO(jansel): test different types of subscript
             lhs_base_type = self.visit(lhs.value)
+            if isinstance(lhs_base_type, TensorType):
+                self.visit(lhs)  # need to populate shape info
             lhs_base_type = lhs_base_type.propagate_setitem(
                 self.visit(lhs.slice), rhs, self.origin()
             )
@@ -1101,12 +1442,14 @@ class TypePropagation(ast.NodeVisitor):
     def visit_BinOp(self, node: ast.BinOp) -> TypeInfo:
         left = self.visit(node.left)
         right = self.visit(node.right)
-        if isinstance(left, TensorType) or isinstance(right, TensorType):
+        if (
+            isinstance(left, TensorType) or isinstance(right, TensorType)
+        ) and self.device_loop_depth == 0:
             warning(exc.TensorOperationInWrapper)
 
         try:
-            left_example = left.example_value()
-            right_example = right.example_value()
+            left_example = left.proxy()
+            right_example = right.proxy()
         except NotImplementedError:
             pass
         else:
@@ -1117,23 +1460,6 @@ class TypePropagation(ast.NodeVisitor):
                 )
             except Exception as e:
                 raise exc.TorchOpTracingError(e) from e
-
-        if isinstance(left, CollectionType) and isinstance(right, CollectionType):
-            result = _eval_binary(
-                node.op,
-                left.element_types,
-                right.element_types,
-            )
-            if isinstance(result, dict):
-                return DictType(
-                    element_types=result,
-                    origin=self.origin(),
-                )
-            assert isinstance(result, (list, tuple))
-            return SequenceType(
-                element_types=result,
-                origin=self.origin(),
-            )
 
         if isinstance(left, UnknownType):
             return left.chained(self.origin())
@@ -1163,7 +1489,10 @@ class TypePropagation(ast.NodeVisitor):
             self.visit(node.left),
             *[self.visit(comparator) for comparator in node.comparators],
         ]
-        if any(isinstance(comparator, TensorType) for comparator in comparators):
+        if (
+            any(isinstance(comparator, TensorType) for comparator in comparators)
+            and self.device_loop_depth == 0
+        ):
             warning(exc.TensorOperationInWrapper)
         result = self._compare(node.ops[0], comparators[0], comparators[1])
         for i in range(2, len(comparators)):
@@ -1207,10 +1536,9 @@ class TypePropagation(ast.NodeVisitor):
                 debug_msg="Failed to unpack */** args to function, got: "
                 + ", ".join(map(str, unhandled)),
                 origin=self.origin(),
+                chained_from=unhandled[0],
             )
-        if self.device_loop_depth:
-            return func.propagate_device_call(tuple(args), kwargs, self.origin())
-        return func.propagate_host_call(tuple(args), kwargs, self.origin())
+        return func.propagate_call(tuple(args), kwargs, self.origin())
 
     def visit_IfExp(self, node: ast.IfExp) -> TypeInfo:
         test = self.visit(node.test)
@@ -1236,9 +1564,30 @@ class TypePropagation(ast.NodeVisitor):
         self._assign(node.target, type_info)
         return type_info
 
+    def visit_Subscript(self, node: ast.Subscript) -> TypeInfo:
+        value_type = self.visit(node.value)
+        slice_type = self.visit(node.slice)
+        return value_type.propagate_getitem(slice_type, self.origin())
+
+    def visit_Slice(self, node: ast.Slice) -> TypeInfo:
+        lower = (
+            self.visit(node.lower)
+            if node.lower is not None
+            else LiteralType(self.origin(), None)
+        )
+        upper = (
+            self.visit(node.upper)
+            if node.upper is not None
+            else LiteralType(self.origin(), None)
+        )
+        step = (
+            self.visit(node.step)
+            if node.step is not None
+            else LiteralType(self.origin(), None)
+        )
+        return SliceType(self.origin(), slice(lower, upper, step))
+
     # TODO(jansel): need to implement these
-    visit_Subscript: _VisitMethod = generic_visit
-    visit_Slice: _VisitMethod = generic_visit
     visit_ListComp: _VisitMethod = generic_visit
     visit_SetComp: _VisitMethod = generic_visit
     visit_GeneratorExp: _VisitMethod = generic_visit
@@ -1315,12 +1664,38 @@ class TypePropagation(ast.NodeVisitor):
         self.push_scope()
         iter_type = self.visit(node.iter)
         self._assign(node.target, iter_type.propagate_iter(self.origin()))
+        device_loop = (
+            isinstance(call_node := node.iter, ast.Call)
+            and isinstance(fn_node := call_node.func, ExtendedAST)
+            and isinstance(fn_type := fn_node._type_info, CallableType)
+            and is_api_func(fn := fn_type.value)
+            and fn._is_device_loop
+        )
+
+        assert isinstance(node, ExtendedAST)
+        node._loop_type = (
+            LoopType.HOST if self.device_loop_depth == 0 else LoopType.DEVICE
+        )
+        if device_loop:
+            if node.orelse:
+                raise exc.DeviceLoopElseBlock(fn.__qualname__)
+
+            self.device_loop_count += 1
+            if self.device_loop_depth == 0:
+                node._loop_type = LoopType.GRID
+                if self.device_loop_count != 1:
+                    raise exc.MultipleDeviceLoops
+                if len(ExtendedAST.current()) != 1:
+                    raise exc.NestedGridLoop
+
+        self.device_loop_depth += device_loop
         body = self._loop_body(node.body)
         with self.swap_scope(body):
             # second pass for fixed point
             body.merge(self._loop_body(node.body))
         orelse = self._body(node.orelse)
         self.scope.merge_if_else(body, orelse)
+        self.device_loop_depth -= device_loop
         return NoType(origin=self.origin())
 
     def visit_While(self, node: ast.While) -> TypeInfo:
@@ -1411,4 +1786,4 @@ def propagate_types(
         for stmt in func.body:
             prop.visit(stmt)
 
-    # func.errors.raise_if_errors()
+    func.env.errors.raise_if_errors()

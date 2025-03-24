@@ -15,6 +15,9 @@ class Origin:
     def is_host(self) -> bool:
         return False
 
+    def is_device(self) -> bool:
+        return not self.is_host()
+
 
 @dataclasses.dataclass
 class HostOrigin(Origin):

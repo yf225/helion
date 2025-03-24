@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import ast
+import enum
 import threading
 import typing
 from typing import TYPE_CHECKING
+from typing import TypeVar
 
 from .source_location import SourceLocation
 from .source_location import current_location
@@ -13,11 +15,21 @@ if TYPE_CHECKING:
 
     from .type_propagation import TypeInfo
 
+    _T = TypeVar("_T", bound=ast.AST)
+    _R = TypeVar("_R")
+
     class _TLS(typing.Protocol):
         active_nodes: list[ExtendedAST]
 
 
 tls: _TLS = typing.cast("_TLS", threading.local())
+
+
+class LoopType(enum.Enum):
+    UNSET = enum.auto()
+    HOST = enum.auto()
+    GRID = enum.auto()
+    DEVICE = enum.auto()
 
 
 class ExtendedAST:
@@ -30,11 +42,26 @@ class ExtendedAST:
     _fields: tuple[str, ...]
 
     def __init__(
-        self, *args: object, _location: SourceLocation, **kwargs: object
+        self,
+        *,
+        _location: SourceLocation,
+        _type_info: TypeInfo | None = None,
+        _loop_type: LoopType = LoopType.UNSET,
+        **kwargs: object,
     ) -> None:
-        super().__init__(*args, **kwargs)
-        self._type_info: TypeInfo | None = None
-        self._location = _location
+        super().__init__(**kwargs)
+        self._type_info: TypeInfo | None = _type_info
+        self._location: SourceLocation = _location
+        self._loop_type: LoopType = _loop_type
+
+    def new(self, fields: dict[str, object]) -> ExtendedAST:
+        result = self.__class__(
+            **fields,
+            _location=self._location,
+            _type_info=self._type_info,
+            _loop_type=self._loop_type,
+        )
+        return self._location.to_ast(result)
 
     def __repr__(self) -> str:
         assert isinstance(self, ast.AST)
@@ -46,10 +73,13 @@ class ExtendedAST:
         self._type_info = type_info
         return self._type_info
 
-    def debug_annotation(self) -> str | None:
+    def debug_annotations(self) -> list[str]:
+        result = []
         if self._type_info:
-            return self._type_info.debug_annotation()
-        return None
+            result.extend(self._type_info.debug_annotations())
+        if self._loop_type != LoopType.UNSET:
+            result.append(f"loop_type={self._loop_type.name}")
+        return result
 
     def __enter__(self) -> None:
         try:
@@ -86,6 +116,37 @@ def get_wrapper_cls(cls: type[ast.AST]) -> type[ast.AST]:
     rv = typing.cast("type[ast.AST]", Wrapper)
     _to_extended[cls] = rv
     return rv
+
+
+def create(cls: type[_T], **fields: object) -> _T:
+    # pyre-ignore[28]
+    result = get_wrapper_cls(cls)(**fields, _location=current_location())
+    assert isinstance(result, ExtendedAST)
+    result._location.to_ast(result)
+    return typing.cast("_T", result)
+
+
+def expr_from_string(template: str, **placeholders: ast.AST) -> ast.AST:
+    (expr,) = ast.parse(template).body
+    assert isinstance(expr, ast.Expr)
+    location: SourceLocation = current_location()
+
+    def _replace(node: _R) -> _R:
+        if isinstance(node, list):
+            return [_replace(item) for item in node]
+        if not isinstance(node, ast.AST):
+            return node
+        if isinstance(node, ast.Name) and node.id in placeholders:
+            return placeholders[node.id]
+        cls = get_wrapper_cls(type(node))
+        return location.to_ast(
+            cls(
+                **{field: _replace(getattr(node, field)) for field in node._fields},
+                _location=location,
+            )
+        )
+
+    return _replace(expr.value)
 
 
 def convert(node: ast.AST) -> ast.AST:

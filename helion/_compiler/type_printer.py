@@ -56,8 +56,11 @@ class ASTPrinter(ast._Unparser):
 
     def traverse(self, node: ast.AST | list[ast.AST]) -> None:
         if isinstance(node, ExtendedAST):
-            if annotation := node.debug_annotation():
-                self.output.insert_annotation(f"{type(node).__name__}: {annotation}")
+            for annotation in node.debug_annotations():
+                if annotation:
+                    self.output.insert_annotation(
+                        f"{type(node).__name__}: {annotation}"
+                    )
         # pyre-ignore[16]
         super().traverse(node)
 

@@ -147,6 +147,7 @@ def basics(x, y):
 
 
 def add(x, y):
+    x, y = torch.broadcast_tensors(x, y)
     out = torch.empty_like(x)
     for tile in hl.tile(out.size()):
         out[tile] = x[tile] + y[tile]
