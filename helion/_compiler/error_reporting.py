@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
     from .source_location import SourceLocation
     from .type_propagation import TypeNotAllowedOnDevice
+    from helion.runtime.settings import Settings
 
     ErrorOrWarning = BaseError | BaseWarning
 
@@ -29,10 +30,10 @@ order_by_location: Callable[[Sequence[ErrorOrWarning]], list[ErrorOrWarning]] = 
 
 
 class ErrorReporting:
-    def __init__(self) -> None:
+    def __init__(self, settings: Settings) -> None:
         self.errors: list[BaseError] = []
         self.warnings: list[BaseWarning] = []
-        self.ignores: tuple[type[BaseWarning], ...] = ()
+        self.ignores: tuple[type[BaseWarning], ...] = tuple(settings.ignore_warnings)
         self.type_errors: dict[SourceLocation, list[exc.TypePropagationError]] = (
             defaultdict(list)
         )
@@ -48,9 +49,8 @@ class ErrorReporting:
         else:
             raise TypeError(f"expected error or warning, got {type(e)}")
 
-    def add_type_error(
-        self, locations: list[SourceLocation], type_info: TypeNotAllowedOnDevice
-    ) -> None:
+    def add_type_error(self, type_info: TypeNotAllowedOnDevice) -> None:
+        locations = type_info.locations
         similar_errors = self.type_errors[locations[0]]
         similar_errors.append(e := exc.TypePropagationError(type_info, similar_errors))
         if len(similar_errors) == 1:

@@ -82,7 +82,7 @@ class GlobalScope(Scope):
                 value = getattr(builtins, name)
                 origin = BuiltinOrigin(name=name, function=self.function)
             else:
-                return UnknownType(origin, f"{name!r} is undefined")
+                raise exc.UndefinedVariable(name) from None
         return TypeInfo.from_example(value, origin)
 
     def set(self, name: str, type_info: TypeInfo) -> NoReturn:
@@ -144,6 +144,11 @@ class LocalScope(Scope):
 
     def clone(self) -> LocalScope:
         return LocalScope(parent=self.parent, variables=dict(self.variables))
+
+    def extract_locals(self) -> dict[str, TypeInfo]:
+        if isinstance(self.parent, LocalScope):
+            return {**self.parent.extract_locals(), **self.variables}
+        return {**self.variables}
 
 
 class TypeInfo:
@@ -376,6 +381,8 @@ class TensorType(TypeInfo):
             elif isinstance(k, TileIndexType):
                 inputs_consumed += 1
                 output_sizes.append(env.block_size_vars[k.block_size_idx])
+            elif isinstance(k, TypeNotAllowedOnDevice):
+                raise exc.TypePropagationError(k)
             else:
                 raise exc.InvalidIndexingType(k)
         if inputs_consumed != self.fake_value.ndim:
@@ -1506,6 +1513,7 @@ class TypePropagation(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> TypeInfo:
         # TODO(jansel): test handling if *args and **kwargs
+        # TODO(jansel): check for calling a Kernel here
         func = self.visit(node.func)
         unhandled = []
         args = []
@@ -1587,12 +1595,6 @@ class TypePropagation(ast.NodeVisitor):
         )
         return SliceType(self.origin(), slice(lower, upper, step))
 
-    # TODO(jansel): need to implement these
-    visit_ListComp: _VisitMethod = generic_visit
-    visit_SetComp: _VisitMethod = generic_visit
-    visit_GeneratorExp: _VisitMethod = generic_visit
-    visit_DictComp: _VisitMethod = generic_visit
-
     ################################################################
     # Statements
     ################################################################
@@ -1661,6 +1663,7 @@ class TypePropagation(ast.NodeVisitor):
         return functools.reduce(lambda x, y: x.merge(y), exit_scopes)
 
     def visit_For(self, node: ast.For) -> TypeInfo:
+        parent_scope = self.scope
         self.push_scope()
         iter_type = self.visit(node.iter)
         self._assign(node.target, iter_type.propagate_iter(self.origin()))
@@ -1682,6 +1685,7 @@ class TypePropagation(ast.NodeVisitor):
 
             self.device_loop_count += 1
             if self.device_loop_depth == 0:
+                self.func.local_types = parent_scope.extract_locals()
                 node._loop_type = LoopType.GRID
                 if self.device_loop_count != 1:
                     raise exc.MultipleDeviceLoops
@@ -1736,6 +1740,12 @@ class TypePropagation(ast.NodeVisitor):
     def _not_supported(self, node: ast.AST) -> TypeInfo:
         raise exc.StatementNotSupported(type(node).__name__)
 
+    # TODO(jansel): need to implement these
+    visit_ListComp: _VisitMethod = _not_supported
+    visit_SetComp: _VisitMethod = _not_supported
+    visit_GeneratorExp: _VisitMethod = _not_supported
+    visit_DictComp: _VisitMethod = _not_supported
+
     # TODO(jansel): support closure functions defined on host
     visit_FunctionDef: _VisitMethod = _not_supported
 
@@ -1757,13 +1767,12 @@ class TypePropagation(ast.NodeVisitor):
     visit_MatchOr: _VisitMethod = _not_supported
 
 
-def propagate_types(
-    func: HostFunction, args: tuple[object, ...], kwargs: dict[str, object]
-) -> None:
+def propagate_types(func: HostFunction, fake_args: list[object]) -> None:
     with func:
         global_scope = GlobalScope(function=func)
         local_scope = LocalScope(parent=global_scope)
-        params = inspect.signature(func.fn).bind(*args, **kwargs)
+        params = inspect.signature(func.fn).bind(*fake_args)
+        params.apply_defaults()
         for name, value in params.arguments.items():
             # TODO(jansel): handle specializations/constexpr
             type_info = TypeInfo.from_example(
@@ -1785,5 +1794,4 @@ def propagate_types(
         prop = TypePropagation(func, local_scope)
         for stmt in func.body:
             prop.visit(stmt)
-
-    func.env.errors.raise_if_errors()
+    CompileEnvironment.current().errors.raise_if_errors()

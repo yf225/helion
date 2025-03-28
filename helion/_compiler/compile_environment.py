@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 import threading
 import typing
 from typing import TYPE_CHECKING
@@ -22,6 +21,7 @@ if TYPE_CHECKING:
     from torch._guards import Source
 
     from .. import exc
+    from helion.runtime.settings import Settings
 
     class _TLS(Protocol):
         env: CompileEnvironment | None
@@ -30,14 +30,17 @@ if TYPE_CHECKING:
 tls: _TLS = typing.cast("_TLS", threading.local())
 
 
-@dataclasses.dataclass
-class Settings:
-    pass
-
-
 class CompileEnvironment:
-    def __init__(self) -> None:
-        self.errors = ErrorReporting()
+    """
+    Global state for the duration of a compilation.
+    There is a 1:1 mapping between this an BoundKernel,
+    and a single CompileEnvironment will be used for multiple Configs.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        super().__init__()
+        self.settings = settings
+        self.errors = ErrorReporting(settings)
         self.shape_env = ShapeEnv(
             specialize_zero_one=True,
             duck_shape=False,
@@ -61,7 +64,13 @@ class CompileEnvironment:
         )
         return idx
 
-    def to_fake(self, tensor: torch.Tensor, source: Source) -> FakeTensor:
+    def to_fake(self, obj: object, source: Source) -> object:
+        if isinstance(obj, torch.Tensor):
+            return self._to_fake_tensor(obj, source)
+        # TODO(jansel): support other types of args
+        raise TypeError(f"unsupported argument type {type(obj)} ({source})")
+
+    def _to_fake_tensor(self, tensor: torch.Tensor, source: Source) -> FakeTensor:
         assert CompileEnvironment.current() is self
         assert not self.fake_mode.is_our_fake(tensor)
         result = self.fake_mode.fake_tensor_converter.from_real_tensor(

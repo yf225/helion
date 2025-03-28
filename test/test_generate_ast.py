@@ -2,34 +2,33 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from typing import TYPE_CHECKING
 import unittest
 
 from expecttest import TestCase
 import torch
-from torch._dynamo.source import LocalSource
 
-from helion._compiler.compile_environment import CompileEnvironment
 from helion._compiler.generate_ast import generate_ast
-from helion._compiler.host_function import HostFunction
-from helion._compiler.type_propagation import propagate_types
 from helion._testing import import_path
 from helion.runtime import Config
 
-type_prop_inputs = import_path(Path(__file__).parent / "data/type_prop_inputs.py")
+if TYPE_CHECKING:
+    from helion import Kernel
+
+datadir = Path(__file__).parent / "data"
+basic_kernels = import_path(datadir / "basic_kernels.py")
 
 
-def generate_report(fn, *args):
-    with CompileEnvironment() as env:
-        args = [env.to_fake(arg, LocalSource(f"arg{i}")) for i, arg in enumerate(args)]
-        host_fn = HostFunction(fn, env)
-        propagate_types(host_fn, args, {})
-        return ast.unparse(generate_ast(host_fn, Config()))
+def generate_report(fn: Kernel, *args):
+    bound_kernel = fn.bind(*args)
+    with bound_kernel.env:
+        return ast.unparse(generate_ast(bound_kernel.host_fn, Config()))
 
 
 class TestTypePropagation(TestCase):
     def test_add(self):
         output = generate_report(
-            type_prop_inputs.add,
+            basic_kernels.add,
             torch.ones([5, 5], dtype=torch.int32),
             torch.ones([5, 5], dtype=torch.int32),
         )

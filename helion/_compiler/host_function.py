@@ -12,6 +12,8 @@ from .compile_environment import CompileEnvironment
 from .source_location import SourceLocation
 from .source_location import UnknownLocation
 from .type_printer import print_ast
+from .type_propagation import TypeInfo
+from .type_propagation import propagate_types
 
 if TYPE_CHECKING:
     import types
@@ -24,11 +26,11 @@ tls: _TLS = typing.cast("_TLS", threading.local())
 
 
 class HostFunction:
-    def __init__(self, fn: types.FunctionType, env: CompileEnvironment) -> None:
+    def __init__(self, fn: types.FunctionType, fake_args: list[object]) -> None:
         super().__init__()
         self.fn = fn
-        self.env = env
         self.location: SourceLocation = UnknownLocation()
+        self.local_types: dict[str, TypeInfo] | None = None
         with self:
             source = inspect.getsource(fn)
             root = ast.parse(source)
@@ -41,6 +43,7 @@ class HostFunction:
             self.name: str = root.name
             self.args: ast.arguments = root.args
             self.body: list[ast.stmt] = root.body
+            propagate_types(self, fake_args)
             # TODO(jansel): assert we don't have any extra decorators
             # TODO(jansel): check type annotations for hl.constexpr/hl.specialize
 
@@ -53,12 +56,11 @@ class HostFunction:
                 ast.FunctionDef(self.name, self.args, self.body, [], None)
             )
         )
-        if error_str := self.env.errors.report(strip_paths=True):
+        if error_str := CompileEnvironment.current().errors.report(strip_paths=True):
             return f"{ast_str}\n\n{error_str}"
         return ast_str
 
     def __enter__(self) -> None:
-        assert CompileEnvironment.current() is self.env
         try:
             tls.functions.append(self)
         except AttributeError:

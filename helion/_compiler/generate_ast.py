@@ -14,6 +14,7 @@ from .ast_extension import ExtendedAST
 from .ast_extension import LoopType
 from .ast_extension import create
 from .ast_extension import expr_from_string
+from .compile_environment import CompileEnvironment
 from .device_function import DeviceFunction
 from .type_propagation import CallableType
 from .type_propagation import SequenceType
@@ -228,14 +229,15 @@ class GenerateAST(ast.NodeVisitor):
                 mask_values.setdefault(f"_block_mask_{k.block_size_idx}")
             else:
                 raise exc.InvalidIndexingType(k)
-        if len(index_values) != tensor_ref.type_info.fake_value.ndim:
-            raise exc.RankMismatch(
-                tensor_ref.type_info.fake_value.ndim, len(index_values)
-            )
 
+        fake_value = tensor_ref.type_info.fake_value
+        if len(index_values) != fake_value.ndim:
+            raise exc.RankMismatch(fake_value.ndim, len(index_values))
         index_expr = []
         for i, idx in enumerate(index_values):
-            index_expr.append(f"{idx}*_{tensor_ref.name}_stride{i}")
+            if fake_value.size(i) != 1:
+                stride = self.device_function.tensor_stride(fake_value, i).name
+                index_expr.append(f"{idx} * {stride}")
         return SubscriptIndexing(
             tensor_ref,
             expr_from_string("+".join(index_expr)),
@@ -246,10 +248,10 @@ class GenerateAST(ast.NodeVisitor):
         assert isinstance(node, ExtendedAST)
         if not isinstance(node, ast.Name):
             raise exc.ExpectedTensorName(type(node.value).__name__)
-        if not isinstance(node._type_info, TensorType):
+        if not isinstance(type_info := node._type_info, TensorType):
             raise exc.ExpectedTensorName(node._type_info)
         if node._type_info.origin.is_host():
-            name = self.device_function.add_tensor_arg(node.id)
+            name = self.device_function.tensor_arg(type_info.fake_value, node.id).name
         else:
             name = node.id
         return TensorReference(
@@ -278,7 +280,7 @@ def generate_ast(func: HostFunction, config: Config) -> ast.AST:
         codegen = GenerateAST(func)
         for stmt in func.body:
             codegen.add_statement(codegen.visit(stmt))
-        func.env.errors.raise_if_errors()
+        CompileEnvironment.current().errors.raise_if_errors()
         functions: list[ast.stmt] = [
             create(
                 ast.FunctionDef,

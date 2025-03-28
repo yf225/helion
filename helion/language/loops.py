@@ -55,7 +55,7 @@ def _tile_type_prop(sizes: TypeInfo, *, origin: Origin) -> TypeInfo:
     except NotImplementedError:
         return UnknownType(
             origin,
-            "tile() expected int or list[int], got {sizes!s}",
+            f"tile() expected int or list[int], got {sizes!s}",
             chained_from=sizes,
         )
 

@@ -105,26 +105,32 @@ class ExpectedTensorName(BaseError):
     message = "Expected tensor name, got {0!s}."
 
 
+class UndefinedVariable(BaseError):
+    message = "{} is not defined."
+
+
 class TypePropagationError(BaseError):
     message = "{}"
 
     def __init__(
         self,
         type_info: TypeNotAllowedOnDevice,
-        similar_errors: list[TypePropagationError],
+        similar_errors: list[TypePropagationError] | None = None,
     ) -> None:
-        super(_FixedMessage, self).__init__(str(type_info))
+        super().__init__(str(type_info))
         self.locations: list[SourceLocation] = [
             *dict.fromkeys([*type_info.locations, self.location])
         ]
-        self.similar_errors = similar_errors
+        if similar_errors is None:
+            similar_errors = []
+        self.similar_errors: list[TypePropagationError] = similar_errors
 
     def __str__(self) -> str:
         msg = super().__str__()[: self.base_msg_len]
         if len(self.similar_errors) > 1:
             msg += f"\n({len(self.similar_errors) - 1} similar errors suppressed)"
         msg += self.location_suffix.format(
-            location="\n".join(loc.format() for loc in self.locations)
+            location="".join(loc.format() for loc in self.locations)
         )
         return msg
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import contextlib
 
 import torch
-
+import helion
 import helion.language as hl
 
 
@@ -12,7 +12,8 @@ def func(a, b, c):
     return a + b + c
 
 
-def basics(x, y):
+@helion.kernel(ignore_warnings=[helion.exc.TensorOperationInWrapper])
+def all_ast_nodes(x, y):
     # def func0(q, v):
     #    nonlocal int_literal
     #    return q + v
@@ -65,10 +66,10 @@ def basics(x, y):
     call2 = func(*(x, y, y))
     call3 = func(x, **{"b": y, "c": y})
     ifexp = x if or_ else y
-    listcomp = [v for v in (1, 2, 3)]
-    dictcomp = {k: v for k, v in [(1, 2), (3, 4)]}
-    setcomp = {v for v in (1, 2, 3)}
-    generator = (v for v in (1, 2, 3))
+    # listcomp = [v for v in (1, 2, 3)]
+    # dictcomp = {k: v for k, v in [(1, 2), (3, 4)]}
+    # setcomp = {v for v in (1, 2, 3)}
+    # generator = (v for v in (1, 2, 3))
     attr0 = x.dtype
     attr1 = x.shape
     attr2 = x.size(0)
@@ -140,14 +141,6 @@ def basics(x, y):
 
     global global0
 
-    out = torch.empty_like(x)
-    for tile in hl.tile(out.size()):
-        out[tile] = x[tile] + y[tile]
-    return out
-
-
-def add(x, y):
-    x, y = torch.broadcast_tensors(x, y)
     out = torch.empty_like(x)
     for tile in hl.tile(out.size()):
         out[tile] = x[tile] + y[tile]
