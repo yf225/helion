@@ -126,9 +126,28 @@ def create(cls: type[_T], **fields: object) -> _T:
     return typing.cast("_T", result)
 
 
-def expr_from_string(template: str, **placeholders: ast.AST) -> ast.AST:
-    (expr,) = ast.parse(template).body
-    assert isinstance(expr, ast.Expr)
+def create_arg(name: str, annotation: str | None = None) -> ast.arg:
+    return create(
+        ast.arg,
+        arg=name,
+        annotation=expr_from_string(annotation) if annotation else None,
+        type_comment=None,
+    )
+
+
+def create_arguments(args: list[ast.arg]) -> ast.arguments:
+    return create(
+        ast.arguments,
+        args=args,
+        posonlyargs=[],
+        defaults=[],
+        kw_defaults=[],
+        kwonlyargs=[],
+    )
+
+
+def statement_from_string(template: str, **placeholders: ast.AST) -> ast.AST:
+    (statement,) = ast.parse(template).body
     location: SourceLocation = current_location()
 
     def _replace(node: _R) -> _R:
@@ -146,7 +165,13 @@ def expr_from_string(template: str, **placeholders: ast.AST) -> ast.AST:
             )
         )
 
-    return _replace(expr.value)
+    return _replace(statement)
+
+
+def expr_from_string(template: str, **placeholders: ast.AST) -> ast.AST:
+    expr = statement_from_string(template, **placeholders)
+    assert isinstance(expr, ast.Expr)
+    return expr.value
 
 
 def convert(node: ast.AST) -> ast.AST:

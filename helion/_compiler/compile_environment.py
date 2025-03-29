@@ -35,10 +35,12 @@ class CompileEnvironment:
     Global state for the duration of a compilation.
     There is a 1:1 mapping between this an BoundKernel,
     and a single CompileEnvironment will be used for multiple Configs.
+    No config or codegen specific state should be stored here.
     """
 
     def __init__(self, settings: Settings) -> None:
         super().__init__()
+        # TODO(jansel): self.device = ...
         self.settings = settings
         self.errors = ErrorReporting(settings)
         self.shape_env = ShapeEnv(
@@ -49,18 +51,27 @@ class CompileEnvironment:
         # TODO(jansel): check for guards in the shapeenv
         self.fake_mode = FakeTensorMode(shape_env=self.shape_env)
         self.input_sources: dict[FakeTensor, Source] = {}
-        self.block_size_numels: list[int | torch.SymInt] = []
-        self.block_size_vars: list[torch.SymInt] = []
+        self.block_sizes: list[BlockSizeInfo] = []
         self.debug_shape_renames: dict[sympy.Expr, sympy.Expr] = {}
 
     def allocate_block_size(self, numel: int | torch.SymInt) -> int:
-        idx = len(self.block_size_numels)
-        self.block_size_numels.append(numel)
+        idx = len(self.block_sizes)
+        if isinstance(numel, torch.SymInt):
+            numel_expr = numel._sympy_()
+        else:
+            numel_expr = sympy.sympify(numel)
         with self.shape_env.ignore_fresh_unbacked_symbols():
             sym = self.shape_env.create_unbacked_symint()
-        self.block_size_vars.append(sym)
+            assert isinstance(sym._sympy_(), sympy.Symbol)
+        self.block_sizes.append(
+            info := BlockSizeInfo(
+                block_size_idx=idx,
+                numel=numel_expr,
+                var=sym,
+            )
+        )
         self.debug_shape_renames[sym._sympy_()] = sympy.Symbol(
-            f"block_size{idx}", integer=True
+            info.name(), integer=True
         )
         return idx
 
@@ -88,9 +99,10 @@ class CompileEnvironment:
         return result
 
     def __enter__(self) -> Self:
-        assert getattr(tls, "env", None) is None
+        assert getattr(tls, "env", None) is None, "CompileEnvironment already active"
         self.fake_mode.__enter__()
         tls.env = self
+        self.errors = ErrorReporting(self.settings)  # clear prior errors
         return self
 
     def __exit__(
@@ -101,6 +113,7 @@ class CompileEnvironment:
     ) -> None:
         tls.env = None
         self.fake_mode.__exit__(exc_type, exc_value, traceback)
+        self.errors.raise_if_errors()
 
     @staticmethod
     def current() -> CompileEnvironment:
@@ -114,6 +127,23 @@ class CompileEnvironment:
 
 class NoCurrentEnvironment(RuntimeError):
     pass
+
+
+class BlockSizeInfo(typing.NamedTuple):
+    """
+    Information about a block size.
+    Used to track the block size for a given dimension.
+    """
+
+    block_size_idx: int
+    numel: sympy.Expr
+    var: torch.SymInt
+
+    def symbol(self) -> sympy.Symbol:
+        return self.var._sympy_()
+
+    def name(self) -> str:
+        return f"block_size{self.block_size_idx}"
 
 
 def warning(warning: exc.BaseWarning | type[exc.BaseWarning]) -> None:

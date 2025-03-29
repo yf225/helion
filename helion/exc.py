@@ -117,21 +117,25 @@ class TypePropagationError(BaseError):
         type_info: TypeNotAllowedOnDevice,
         similar_errors: list[TypePropagationError] | None = None,
     ) -> None:
-        super().__init__(str(type_info))
+        from ._compiler.source_location import current_location
+
         self.locations: list[SourceLocation] = [
-            *dict.fromkeys([*type_info.locations, self.location])
+            *dict.fromkeys([*type_info.locations, current_location()])
         ]
         if similar_errors is None:
             similar_errors = []
         self.similar_errors: list[TypePropagationError] = similar_errors
-
-    def __str__(self) -> str:
-        msg = super().__str__()[: self.base_msg_len]
-        if len(self.similar_errors) > 1:
-            msg += f"\n({len(self.similar_errors) - 1} similar errors suppressed)"
+        msg = str(type_info)
+        self.base_msg_len: int = len(msg)
         msg += self.location_suffix.format(
             location="".join(loc.format() for loc in self.locations)
         )
+        super(_FixedMessage, self).__init__(msg)
+
+    def __str__(self) -> str:
+        msg = super().__str__()
+        if len(self.similar_errors) > 1:
+            msg += f"({len(self.similar_errors) - 1} similar errors suppressed)\n"
         return msg
 
 

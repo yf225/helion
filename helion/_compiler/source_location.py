@@ -128,7 +128,7 @@ class UnknownLocation(SourceLocation):
         return "<unknown location>"
 
     def format(self) -> str:
-        return "unknown location"
+        return "unknown location\n"
 
     def __bool__(self) -> bool:
         return False

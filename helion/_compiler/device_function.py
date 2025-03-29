@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from collections import defaultdict
 import dataclasses
 import itertools
@@ -7,12 +8,24 @@ from typing import TYPE_CHECKING
 from typing import TypeVar
 from typing import cast
 
-if TYPE_CHECKING:
-    import ast
+import sympy
+from torch._inductor.codegen.triton import texpr
 
+from .ast_extension import create
+from .ast_extension import create_arg
+from .ast_extension import create_arguments
+from .ast_extension import expr_from_string
+from .ast_extension import statement_from_string
+from .compile_environment import CompileEnvironment
+from .host_function import HostFunction
+from .tile_strategy import FlattenedTileStrategy
+from .tile_strategy import TileStrategy
+from .variable_origin import TensorSizeOrigin
+
+if TYPE_CHECKING:
     import torch
 
-    _P = TypeVar("_P", bound="TensorProperty")
+    _P = TypeVar("_P", bound="TensorPropertyArg")
 
 
 @dataclasses.dataclass
@@ -22,71 +35,175 @@ class Argument:
     def host_str(self) -> str:
         raise NotImplementedError
 
+    def arg_def_node(self) -> ast.arg:
+        return create_arg(self.name)
+
+    def sort_key(self) -> tuple[object, ...]:
+        return (_sort_order[type(self)],)
+
 
 @dataclasses.dataclass
-class TensorArgument(Argument):
+class TensorArg(Argument):
     fake_value: torch.Tensor
+    _host_str: str
 
     def host_str(self) -> str:
-        return self.name  # name is same host/device
+        return self._host_str
 
 
 @dataclasses.dataclass
-class TensorProperty(Argument):
-    tensor_arg: TensorArgument
+class TensorPropertyArg(Argument):
+    tensor_arg: TensorArg
     dim: int
 
+    def sort_key(self) -> tuple[object, ...]:
+        return (_sort_order[type(self)], self.tensor_arg.name, self.dim)
 
-class TensorSize(TensorProperty):
+
+class TensorSizeArg(TensorPropertyArg):
     def host_str(self) -> str:
         return f"{self.tensor_arg.host_str()}.size({self.dim})"
 
 
-class TensorStride(TensorProperty):
+class TensorStrideArg(TensorPropertyArg):
     def host_str(self) -> str:
         return f"{self.tensor_arg.host_str()}.stride({self.dim})"
+
+
+@dataclasses.dataclass
+class ConstExprArg(Argument):
+    _host_str: str
+
+    def host_str(self) -> str:
+        return self._host_str
+
+    def arg_def_node(self) -> ast.arg:
+        return create_arg(self.name, "tl.constexpr")
+
+
+_sort_order: dict[type[Argument], int] = {
+    TensorArg: 0,
+    TensorSizeArg: 1,
+    TensorStrideArg: 2,
+    ConstExprArg: 3,
+}
 
 
 class DeviceFunction:
     def __init__(self, name: str) -> None:
         super().__init__()
+        # TODO(jansel): self.config = ...
         self.name = name
         self.arguments: list[Argument] = []
         self.body: list[ast.AST] = []
-        self._tensor_args: dict[torch.Tensor, TensorArgument] = {}
+        self._tensor_args: dict[torch.Tensor, TensorArg] = {}
         self._tensor_properties: dict[
-            tuple[type[TensorProperty], torch.Tensor, int], TensorProperty
+            tuple[type[TensorPropertyArg], torch.Tensor, int], TensorPropertyArg
         ] = {}
         self._unique_counter: dict[str, itertools.count[int]] = defaultdict(
             itertools.count
         )
+        self.tile_strategy: TileStrategy = FlattenedTileStrategy(self)
+        self.grid_expr: ast.AST | None = None
+
+    def set_grid_expr(self, grid_expr: ast.AST) -> None:
+        assert self.grid_expr is None, "grid_expr already set"
+        self.grid_expr = grid_expr
+
+    def block_index_var(self, dim: int) -> str:
+        return self.tile_strategy.index_var(dim)
+
+    def block_mask_var(self, dim: int | None = None) -> str | None:
+        return self.tile_strategy.mask_var(dim)
+
+    def sympy_expr(self, expr: sympy.Expr) -> str:
+        symbol_to_origin = HostFunction.current().symbol_to_origin
+        expr = CompileEnvironment.current().shape_env.simplify(expr)
+        replacements = {}
+        for sym in sorted(expr.free_symbols, key=lambda x: x.name):
+            assert isinstance(sym, sympy.Symbol)
+            assert sym.name in symbol_to_origin, f"no origin found for {sym.name}"
+            origin = symbol_to_origin[sym.name]
+            if isinstance(origin.origin, TensorSizeOrigin):
+                assert origin.fake_value is not None
+                arg = self.tensor_size(
+                    origin.fake_value,
+                    origin.origin.key,
+                )
+                replacements[sym] = sympy.Symbol(arg.name, integer=True)
+            else:
+                raise NotImplementedError(
+                    "TODO(jansel): handle reading symint directly"
+                )
+        return texpr(expr.xreplace(replacements))
 
     def unique_name(self, prefix: str) -> str:
-        return f"_{prefix}_{next(self._unique_counter[prefix])}"
+        return self.new_var(f"{prefix}_{next(self._unique_counter[prefix])}")
+
+    def new_var(self, name: str) -> str:
+        # TODO(jansel): Check for conflicts with user-defined names and rename if needed
+        return f"_{name}"
 
     def tensor_arg(
-        self, fake_value: torch.Tensor, host_name: str | None = None
-    ) -> TensorArgument:
+        self, fake_value: torch.Tensor, prefer_name: str | None = None
+    ) -> TensorArg:
         if fake_value not in self._tensor_args:
-            arg = TensorArgument(host_name or self.unique_name("tensor"), fake_value)
+            origin = HostFunction.current().tensor_to_origin[fake_value]
+            arg = TensorArg(
+                self.new_var(prefer_name or origin.suggest_var_name()),
+                fake_value,
+                origin.host_str(),
+            )
             self.arguments.append(arg)
             self._tensor_args[fake_value] = arg
         return self._tensor_args[fake_value]
 
+    def constexpr_arg(self, name: str, host_str: str | None = None) -> ConstExprArg:
+        self.arguments.append(rv := ConstExprArg(name, host_str or name))
+        return rv
+
     def _tensor_property(
-        self, prop_cls: type[_P], fake_value: torch.Tensor, dim: int, prefix: str
+        self,
+        prop_cls: type[_P],
+        fake_value: torch.Tensor,
+        dim: int,
+        prefix: str,
     ) -> _P:
         # TODO(jansel): dedupe based on sympy expressions
         key = (prop_cls, fake_value, dim)
         if key not in self._tensor_properties:
             arg = self.tensor_arg(fake_value)
-            prop = prop_cls(f"_{arg.name}_{prefix}{dim}", arg, dim)
+            prop = prop_cls(f"{arg.name}_{prefix}_{dim}", arg, dim)
             self.arguments.append(prop)
             self._tensor_properties[key] = prop
         return cast("_P", self._tensor_properties[key])
 
-    def tensor_size(self, fake_value: torch.Tensor, dim: int) -> TensorSize:
-        return self._tensor_property(TensorSize, fake_value, dim, "size")
+    def tensor_size(self, fake_value: torch.Tensor, dim: int) -> TensorSizeArg:
+        return self._tensor_property(TensorSizeArg, fake_value, dim, "size")
 
-    def tensor_stride(self, fake_value: torch.Tensor, dim: int) -> TensorStride:
-        return self._tensor_property(TensorStride, fake_value, dim, "stride")
+    def tensor_stride(self, fake_value: torch.Tensor, dim: int) -> TensorStrideArg:
+        return self._tensor_property(TensorStrideArg, fake_value, dim, "stride")
+
+    def sorted_args(self) -> list[Argument]:
+        self.arguments.sort(key=lambda arg: arg.sort_key())
+        return self.arguments
+
+    def codegen_function_def(self) -> ast.FunctionDef:
+        return create(
+            ast.FunctionDef,
+            name=self.name,
+            args=create_arguments([arg.arg_def_node() for arg in self.sorted_args()]),
+            body=self.body,
+            decorator_list=[expr_from_string("triton.jit")],
+            type_params=[],
+        )
+
+    def codegen_function_call(self) -> ast.AST:
+        args = [arg.host_str() for arg in self.sorted_args()]
+        grid_expr = self.grid_expr
+        assert grid_expr is not None
+        # TODO(jansel): we should run CSE this statement
+        return statement_from_string(
+            f"{self.name}[__call_grid_expr]({', '.join(args)})",
+            __call_grid_expr=grid_expr,
+        )

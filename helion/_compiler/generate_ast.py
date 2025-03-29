@@ -6,7 +6,6 @@ import functools
 from typing import TYPE_CHECKING
 from typing import Callable
 from typing import NamedTuple
-from typing import TypeGuard
 
 from .. import exc
 from ..language._decorators import is_api_func
@@ -14,6 +13,7 @@ from .ast_extension import ExtendedAST
 from .ast_extension import LoopType
 from .ast_extension import create
 from .ast_extension import expr_from_string
+from .ast_extension import statement_from_string
 from .compile_environment import CompileEnvironment
 from .device_function import DeviceFunction
 from .type_propagation import CallableType
@@ -27,12 +27,32 @@ if TYPE_CHECKING:
 
     from ..runtime import Config
     from .host_function import HostFunction
+    from .tile_strategy import TileStrategy
+
+
+OUTPUT_CODE_HEADER = """\
+import torch
+import triton
+from triton import language as tl
+
+"""
 
 
 class CodegenState(NamedTuple):
     node: ast.AST
     type_info: TypeInfo
     codegen: GenerateAST
+
+    @property
+    def device_function(self) -> DeviceFunction:
+        return self.codegen.device_function
+
+    @property
+    def tile_strategy(self) -> TileStrategy:
+        return self.codegen.device_function.tile_strategy
+
+    def add_statement(self, statement: ast.stmt | str) -> None:
+        return self.codegen.add_statement(statement)
 
 
 def device_only(
@@ -60,8 +80,22 @@ class GenerateAST(ast.NodeVisitor):
         self.on_device = False
         self.device_function = DeviceFunction(f"_{func.name}_kernel")
 
-    def add_statement(self, stmt: ast.AST) -> None:
+    def add_statement(self, stmt: ast.AST | str) -> None:
+        if isinstance(stmt, str):
+            stmt = statement_from_string(stmt)
         self.statements_stack[-1].append(stmt)
+
+    def tmpvar(self) -> str:
+        return self.device_function.unique_name("v")
+
+    def lift(self, expr: ast.AST) -> ast.AST:
+        if isinstance(expr, ast.Name):
+            return expr
+        assert isinstance(expr, ExtendedAST)
+        with expr:
+            varname = self.tmpvar()
+            self.add_statement(statement_from_string(f"{varname} = expr", expr=expr))
+            return create(ast.Name, id=varname, ctx=ast.Load())
 
     @contextlib.contextmanager
     def set_statements(self, new_statements: list[ast.AST] | None) -> Iterator[None]:
@@ -78,10 +112,13 @@ class GenerateAST(ast.NodeVisitor):
     def set_on_device(self) -> Iterator[None]:
         assert self.on_device is False
         self.on_device = True
+        prior = self.host_statements
+        self.host_statements = self.statements_stack[-1]
         try:
             yield
         finally:
             self.on_device = False
+            self.host_statements = prior
 
     def visit(self, node: ast.AST) -> ast.AST:
         assert isinstance(node, ExtendedAST)
@@ -122,45 +159,37 @@ class GenerateAST(ast.NodeVisitor):
         if node._loop_type == LoopType.GRID:
             assert not node.orelse
             with (
-                self.set_statements(st := self.device_function.body),
                 self.set_on_device(),
+                self.set_statements(st := self.device_function.body),
             ):
-                # TODO(jansel): need to handle args from target/iter
+                self.visit(node.iter)
                 for stmt in node.body:
                     st.append(self.visit(stmt))
-            # TODO(jansel): need to generate the call args
-            return create(
-                ast.Expr,
-                value=create(
-                    ast.Call,
-                    func=create(ast.Name, id=self.device_function.name, ctx=ast.Load()),
-                    args=[],
-                    keywords=[],
-                ),
-            )
+            return self.device_function.codegen_function_call()
         return self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
-        result = self.generic_visit(node)
         assert isinstance(node.func, ExtendedAST)
         if (
             isinstance(fn_type := node.func._type_info, CallableType)
             and is_api_func(api := fn_type.value)
             and api._codegen is not None
         ):
-            return api._codegen(CodegenState(result, fn_type, self))
-        return result
-
-    def needs_host_device_transfer(self, node: ast.AST) -> TypeGuard[ExtendedAST]:
-        assert isinstance(node, ExtendedAST)
-        type_info = node._type_info
-        return self.on_device and type_info is not None and type_info.origin.is_host()
+            return api._codegen(CodegenState(node, node._type_info, self))
+        return self.generic_visit(node)
 
     @device_only
     def visit_Name(self, node: ast.Name) -> ast.AST:
-        if isinstance(node.ctx, ast.Load) and self.needs_host_device_transfer(node):
-            assert isinstance(node, ExtendedAST)
-            assert isinstance(node._type_info, TensorType), "TODO: handle other types"
+        assert isinstance(node, ExtendedAST)
+        type_info = node._type_info
+        if (
+            self.on_device
+            and isinstance(node.ctx, ast.Load)
+            and type_info.origin.is_host()
+        ):
+            assert isinstance(type_info, TensorType), (
+                f"TODO: handle other types {type_info}"
+            )
             return self.tensor_reference(node).node
         return self.generic_visit(node)
 
@@ -186,26 +215,26 @@ class GenerateAST(ast.NodeVisitor):
             raise exc.ShapeMismatch(lhs_type, rhs_type)
         value = self.visit(node.value)
         indexing = self.subscript_indexing(target)
-        return create(
-            ast.Expr,
-            value=expr_from_string(
-                "tl.store(name + offset, value, mask)",
-                value=value,
-                name=indexing.tensor_ref.node,
-                offset=indexing.index_expr,
-                mask=indexing.mask_expr,
-            ),
+        return statement_from_string(
+            "tl.store(name + offset, value, mask)",
+            value=self.lift(value),
+            name=indexing.tensor_ref.node,
+            offset=indexing.index_expr,
+            mask=indexing.mask_expr,
         )
 
     @device_only
     def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
         # TODO(jansel): non tensor types?
+        # TODO(jansel): de-duplicate redundant loads
         indexing = self.subscript_indexing(node)
-        return expr_from_string(
-            "tl.load(name + offset, mask)",
-            name=indexing.tensor_ref.node,
-            offset=indexing.index_expr,
-            mask=indexing.mask_expr,
+        return self.lift(
+            expr_from_string(
+                "tl.load(name + offset, mask)",
+                name=indexing.tensor_ref.node,
+                offset=indexing.index_expr,
+                mask=indexing.mask_expr,
+            )
         )
 
     def subscript_indexing(self, node: ast.Subscript) -> SubscriptIndexing:
@@ -224,9 +253,13 @@ class GenerateAST(ast.NodeVisitor):
         mask_values = {}
         for k in keys:
             if isinstance(k, TileIndexType):
-                index_values.append(f"_block_idx_{k.block_size_idx}")
-                # TODO(jansel): optimize away masks
-                mask_values.setdefault(f"_block_mask_{k.block_size_idx}")
+                index_values.append(
+                    self.device_function.tile_strategy.index_var(k.block_size_idx)
+                )
+                if mask := self.device_function.tile_strategy.mask_var(
+                    k.block_size_idx
+                ):
+                    mask_values.setdefault(mask)
             else:
                 raise exc.InvalidIndexingType(k)
 
@@ -251,7 +284,9 @@ class GenerateAST(ast.NodeVisitor):
         if not isinstance(type_info := node._type_info, TensorType):
             raise exc.ExpectedTensorName(node._type_info)
         if node._type_info.origin.is_host():
-            name = self.device_function.tensor_arg(type_info.fake_value, node.id).name
+            name = self.device_function.tensor_arg(
+                type_info.fake_value, prefer_name=node.id
+            ).name
         else:
             name = node.id
         return TensorReference(
@@ -281,20 +316,10 @@ def generate_ast(func: HostFunction, config: Config) -> ast.AST:
         for stmt in func.body:
             codegen.add_statement(codegen.visit(stmt))
         CompileEnvironment.current().errors.raise_if_errors()
-        functions: list[ast.stmt] = [
-            create(
-                ast.FunctionDef,
-                name=codegen.device_function.name,
-                args=[],
-                body=codegen.device_function.body,
-                decorator_list=[],
-            ),
-            create(
-                ast.FunctionDef,
-                name=func.name,
-                args=func.args,
-                body=codegen.host_statements,
-                decorator_list=[],
-            ),
-        ]
-        return ast.Module(functions, [])
+        return ast.Module(
+            [
+                codegen.device_function.codegen_function_def(),
+                func.codegen_function_def(codegen.host_statements),
+            ],
+            [],
+        )

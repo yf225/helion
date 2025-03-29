@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import functools
 import inspect
 from typing import TYPE_CHECKING
@@ -8,15 +9,20 @@ from typing import overload
 
 import torch
 from torch._dynamo.source import LocalSource
+from torch._inductor.codecache import PyCodeCache
 
 from .._compiler.compile_environment import CompileEnvironment
+from .._compiler.generate_ast import OUTPUT_CODE_HEADER
+from .._compiler.generate_ast import generate_ast
 from .._compiler.host_function import HostFunction
-from helion.runtime.settings import Settings
+from .settings import Settings
 
 if TYPE_CHECKING:
     from collections.abc import Hashable
     from collections.abc import Sequence
     import types
+
+    from .config import Config
 
 
 class Kernel:
@@ -47,21 +53,26 @@ class Kernel:
                 f"Kernel({self.name}) cannot have *args, **kwargs, or keyword-only arguments"
             )
 
-    def bind(self, *args: object) -> BoundKernel:
+    def bind(self, args: tuple[object, ...]) -> BoundKernel:
         """
         Bind the given arguments to the Kernel and return a BoundKernel object.
 
         :param args: The arguments to bind to the Kernel.
         :return: A BoundKernel object with the given arguments bound.
         """
+        if not isinstance(args, tuple):
+            assert isinstance(args, list), "args must be a tuple or list"
+            args = tuple(args)
         signature = _specialization_key(args)
         bound_kernel = self.bound_kernels.get(signature)
         if bound_kernel is None:
-            normalized_args = self.normalize_args(*args)
+            normalized_args: tuple[object, ...] = self.normalize_args(*args)
             if len(normalized_args) != len(args):
                 # we had default args that needed to be applied
-                return self.bind(*normalized_args)
-            self.bound_kernels[signature] = bound_kernel = BoundKernel(self, args)
+                bound_kernel = self.bind(normalized_args)
+            else:
+                bound_kernel = BoundKernel(self, args)
+            self.bound_kernels[signature] = bound_kernel
         return bound_kernel
 
     def normalize_args(self, *args: object, **kwargs: object) -> tuple[object, ...]:
@@ -86,7 +97,7 @@ class Kernel:
         """
         if kwargs:
             args = self.normalize_args(*args, **kwargs)
-        return self.bind(*args)(*args)
+        return self.bind(args)(*args)
 
 
 class BoundKernel:
@@ -103,6 +114,14 @@ class BoundKernel:
                 for name, arg in zip(self.kernel.signature.parameters, args)
             ]
             self.host_fn: HostFunction = HostFunction(self.kernel.fn, self.fake_args)
+
+    def to_triton_code(self, config: Config) -> str:
+        with self.env:
+            return OUTPUT_CODE_HEADER + ast.unparse(generate_ast(self.host_fn, config))
+
+    def compile_config(self, config: Config) -> Callable[..., object]:
+        module = PyCodeCache.load(self.to_triton_code(config))
+        return getattr(module, self.kernel.name)
 
     def _debug_types(self) -> str:
         with self.env:

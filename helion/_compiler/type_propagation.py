@@ -24,6 +24,8 @@ from .ast_extension import ExtendedAST
 from .ast_extension import LoopType
 from .compile_environment import CompileEnvironment
 from .compile_environment import warning
+from .host_function import HostFunction
+from .host_function import SymbolOrigin
 from .source_location import SourceLocation
 from .source_location import current_location
 from .variable_origin import ArgumentOrigin
@@ -35,6 +37,7 @@ from .variable_origin import GetItemOrigin
 from .variable_origin import GlobalOrigin
 from .variable_origin import Origin
 from .variable_origin import SourceOrigin
+from .variable_origin import TensorSizeOrigin
 
 # pyre-ignore-all-errors[8,15,58]: visit_* overrides
 if TYPE_CHECKING:
@@ -43,8 +46,6 @@ if TYPE_CHECKING:
     from typing_extensions import Self
 
     from torch.fx import GraphModule
-
-    from .host_function import HostFunction
 
     class _VisitMethod(Protocol):
         @staticmethod
@@ -298,6 +299,9 @@ class TypeInfo:
     def as_literal(self) -> object:
         raise NotImplementedError
 
+    def populate_symbol_origins(self, origin: Origin) -> None:
+        pass
+
 
 class TensorType(TypeInfo):
     fake_value: torch.Tensor
@@ -380,7 +384,7 @@ class TensorType(TypeInfo):
                 output_sizes.append((stop - start) // step)
             elif isinstance(k, TileIndexType):
                 inputs_consumed += 1
-                output_sizes.append(env.block_size_vars[k.block_size_idx])
+                output_sizes.append(env.block_sizes[k.block_size_idx].var)
             elif isinstance(k, TypeNotAllowedOnDevice):
                 raise exc.TypePropagationError(k)
             else:
@@ -444,6 +448,28 @@ class TensorType(TypeInfo):
             # TODO(jansel): stride check?
             return TensorType(other.origin, torch.empty_like(self.fake_value))
         return super().merge(other)
+
+    def populate_symbol_origins(self, origin: Origin) -> None:
+        shape_env = CompileEnvironment.current().shape_env
+        symbol_to_origin = HostFunction.current().symbol_to_origin
+        tensor_to_origin = HostFunction.current().tensor_to_origin
+        if (
+            self.fake_value not in tensor_to_origin
+            or origin.depth() < tensor_to_origin[self.fake_value].depth()
+        ):
+            tensor_to_origin[self.fake_value] = origin
+        for i, size in enumerate(self.fake_value.size()):
+            if isinstance(size, torch.SymInt):
+                sym = shape_env.replace(size._sympy_())
+                if isinstance(sym, sympy.Symbol):
+                    sub_origin = TensorSizeOrigin(origin, i)
+                    if (
+                        sym.name not in symbol_to_origin
+                        or sub_origin.depth() < symbol_to_origin[sym.name].depth()
+                    ):
+                        symbol_to_origin[sym.name] = SymbolOrigin(
+                            sub_origin, fake_value=self.fake_value
+                        )
 
 
 class TensorAttributeType(TypeInfo):
@@ -732,6 +758,16 @@ class NumericType(TypeInfo):
     def new_unbacked(cls, origin: Origin) -> Self:
         raise NotImplementedError
 
+    def populate_symbol_origins(self, origin: Origin) -> None:
+        symbol_to_origin = HostFunction.current().symbol_to_origin
+        sym = self.value._sympy_()
+        if isinstance(sym, sympy.Symbol):
+            if (
+                sym.name not in symbol_to_origin
+                or origin.depth() < symbol_to_origin[sym.name].depth()
+            ):
+                symbol_to_origin[sym.name] = SymbolOrigin(origin)
+
 
 class SymIntType(NumericType):
     value: torch.SymInt
@@ -793,6 +829,9 @@ _numeric_types: dict[type[object], type[NumericType]] = {
 
 class TileIndexType(TypeInfo):
     block_size_idx: int
+
+    def __str__(self) -> str:
+        return f"{type(self).__name__}({self.block_size_idx})"
 
     def __init__(self, origin: Origin, block_size_idx: int) -> None:
         super().__init__(origin)
@@ -954,6 +993,10 @@ class SequenceType(CollectionType):
     def unpack(self) -> list[TypeInfo]:
         return [*self.element_types]
 
+    def populate_symbol_origins(self, origin: Origin) -> None:
+        for i, subtype in enumerate(self.element_types):
+            subtype.populate_symbol_origins(GetItemOrigin(origin, i))
+
 
 class DictType(CollectionType):
     element_types: dict[str | int, TypeInfo]
@@ -970,6 +1013,10 @@ class DictType(CollectionType):
 
     def unpack(self) -> list[TypeInfo]:
         return [TypeInfo.from_example(k, self.origin) for k in self.element_types]
+
+    def populate_symbol_origins(self, origin: Origin) -> None:
+        for k, subtype in self.element_types.items():
+            subtype.populate_symbol_origins(GetItemOrigin(origin, k))
 
 
 class SliceType(CollectionType):
@@ -1685,7 +1732,7 @@ class TypePropagation(ast.NodeVisitor):
 
             self.device_loop_count += 1
             if self.device_loop_depth == 0:
-                self.func.local_types = parent_scope.extract_locals()
+                self.func.set_local_types(parent_scope.extract_locals())
                 node._loop_type = LoopType.GRID
                 if self.device_loop_count != 1:
                     raise exc.MultipleDeviceLoops
@@ -1794,4 +1841,3 @@ def propagate_types(func: HostFunction, fake_args: list[object]) -> None:
         prop = TypePropagation(func, local_scope)
         for stmt in func.body:
             prop.visit(stmt)
-    CompileEnvironment.current().errors.raise_if_errors()
