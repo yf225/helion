@@ -19,11 +19,14 @@ from .ast_extension import statement_from_string
 from .compile_environment import CompileEnvironment
 from .host_function import HostFunction
 from .tile_strategy import FlattenedTileStrategy
+from .tile_strategy import NDTileStrategy
 from .tile_strategy import TileStrategy
 from .variable_origin import TensorSizeOrigin
 
 if TYPE_CHECKING:
     import torch
+
+    from ..runtime.config import Config
 
     _P = TypeVar("_P", bound="TensorPropertyArg")
 
@@ -90,10 +93,10 @@ _sort_order: dict[type[Argument], int] = {
 
 
 class DeviceFunction:
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, config: Config) -> None:
         super().__init__()
-        # TODO(jansel): self.config = ...
         self.name = name
+        self.config = config
         self.arguments: list[Argument] = []
         self.body: list[ast.AST] = []
         self._tensor_args: dict[torch.Tensor, TensorArg] = {}
@@ -103,7 +106,10 @@ class DeviceFunction:
         self._unique_counter: dict[str, itertools.count[int]] = defaultdict(
             itertools.count
         )
-        self.tile_strategy: TileStrategy = FlattenedTileStrategy(self)
+        if isinstance(config.block_sizes[0], int):
+            self.tile_strategy: TileStrategy = FlattenedTileStrategy(self, config)
+        else:
+            self.tile_strategy: TileStrategy = NDTileStrategy(self, config)
         self.grid_expr: ast.AST | None = None
 
     def set_grid_expr(self, grid_expr: ast.AST) -> None:

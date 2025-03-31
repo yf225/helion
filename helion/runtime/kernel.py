@@ -15,6 +15,7 @@ from .._compiler.compile_environment import CompileEnvironment
 from .._compiler.generate_ast import OUTPUT_CODE_HEADER
 from .._compiler.generate_ast import generate_ast
 from .._compiler.host_function import HostFunction
+from .config import Config
 from .settings import Settings
 
 if TYPE_CHECKING:
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     import types
 
-    from .config import Config
+    ConfigLike = Config | dict[str, object]
 
 
 class Kernel:
@@ -115,11 +116,13 @@ class BoundKernel:
             ]
             self.host_fn: HostFunction = HostFunction(self.kernel.fn, self.fake_args)
 
-    def to_triton_code(self, config: Config) -> str:
+    def to_triton_code(self, config: ConfigLike) -> str:
         with self.env:
+            config = Config(config)
+            self.env.config_spec.normalize(config)
             return OUTPUT_CODE_HEADER + ast.unparse(generate_ast(self.host_fn, config))
 
-    def compile_config(self, config: Config) -> Callable[..., object]:
+    def compile_config(self, config: ConfigLike) -> Callable[..., object]:
         module = PyCodeCache.load(self.to_triton_code(config))
         return getattr(module, self.kernel.name)
 

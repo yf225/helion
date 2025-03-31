@@ -19,6 +19,8 @@ from torch._inductor.decomposition import select_decomp_table
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from .. import exc
+from ..autotuner.config_spec import BlockSizeSpec
+from ..autotuner.config_spec import PermutationSpec
 from ..language._decorators import is_api_func
 from .ast_extension import ExtendedAST
 from .ast_extension import LoopType
@@ -838,10 +840,19 @@ class TileIndexType(TypeInfo):
         self.block_size_idx = block_size_idx
 
     @staticmethod
-    def allocate(numel: int | torch.SymInt, origin: Origin) -> TileIndexType:
-        return TileIndexType(
-            origin, CompileEnvironment.current().allocate_block_size(numel)
+    def allocate(
+        numels: list[int | torch.SymInt], origin: Origin
+    ) -> list[TileIndexType]:
+        env = CompileEnvironment.current()
+        env.config_spec.block_size_specs.append(
+            BlockSizeSpec(
+                size_hints=[env.size_hint(x) for x in numels],
+                allow_flattened=len(numels) > 1,
+            )
         )
+        if len(numels) > 1:
+            env.config_spec.loop_order_specs.append(PermutationSpec(len(numels)))
+        return [TileIndexType(origin, env.allocate_block_size(x)) for x in numels]
 
     def merge(self, other: TypeInfo) -> TypeInfo:
         if isinstance(other, TileIndexType):

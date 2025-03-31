@@ -150,6 +150,10 @@ class _WrapException(BaseError):
         super().__init__(name=type(e).__name__, msg=str(e))
 
 
+class InvalidConfig(BaseError):
+    message = "{}"
+
+
 class InternalError(_WrapException):
     pass
 

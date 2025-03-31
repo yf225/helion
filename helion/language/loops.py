@@ -94,11 +94,9 @@ def _tile_type_prop(sizes: TypeInfo, *, origin: Origin) -> TypeInfo:
     if not isinstance(parent, ast.For):
         raise exc.LoopFunctionNotInFor("tile")
     if isinstance(proxy_sizes, (int, torch.SymInt)):
-        result = TileIndexType.allocate(proxy_sizes, origin)
+        result = TileIndexType.allocate([proxy_sizes], origin)[0]
     else:
-        result = SequenceType(
-            origin, [TileIndexType.allocate(x, origin) for x in proxy_sizes]
-        )
+        result = SequenceType(origin, TileIndexType.allocate(proxy_sizes, origin))
     return IterType(origin, result)
 
 

@@ -51,6 +51,10 @@ class CodegenState(NamedTuple):
     def tile_strategy(self) -> TileStrategy:
         return self.codegen.device_function.tile_strategy
 
+    @property
+    def config(self) -> Config:
+        return self.codegen.device_function.config
+
     def add_statement(self, statement: ast.stmt | str) -> None:
         return self.codegen.add_statement(statement)
 
@@ -73,12 +77,12 @@ def _not_supported_on_device(self: GenerateAST, node: ast.AST) -> ast.AST:
 
 
 class GenerateAST(ast.NodeVisitor):
-    def __init__(self, func: HostFunction) -> None:
+    def __init__(self, func: HostFunction, config: Config) -> None:
         super().__init__()
         self.host_statements: list[ast.AST] = []
         self.statements_stack: list[list[ast.AST]] = [self.host_statements]
         self.on_device = False
-        self.device_function = DeviceFunction(f"_{func.name}_kernel")
+        self.device_function = DeviceFunction(f"_{func.name}_kernel", config)
 
     def add_statement(self, stmt: ast.AST | str) -> None:
         if isinstance(stmt, str):
@@ -312,7 +316,7 @@ class SubscriptIndexing(NamedTuple):
 
 def generate_ast(func: HostFunction, config: Config) -> ast.AST:
     with func:
-        codegen = GenerateAST(func)
+        codegen = GenerateAST(func, config)
         for stmt in func.body:
             codegen.add_statement(codegen.visit(stmt))
         CompileEnvironment.current().errors.raise_if_errors()

@@ -12,6 +12,7 @@ from torch._subclasses import FakeTensor
 from torch._subclasses import FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
+from ..autotuner import ConfigSpec
 from .error_reporting import ErrorReporting
 
 if TYPE_CHECKING:
@@ -53,6 +54,7 @@ class CompileEnvironment:
         self.input_sources: dict[FakeTensor, Source] = {}
         self.block_sizes: list[BlockSizeInfo] = []
         self.debug_shape_renames: dict[sympy.Expr, sympy.Expr] = {}
+        self.config_spec = ConfigSpec()
 
     def allocate_block_size(self, numel: int | torch.SymInt) -> int:
         idx = len(self.block_sizes)
@@ -97,6 +99,13 @@ class CompileEnvironment:
                         f"{source.local_name}_size{i}", integer=True
                     )
         return result
+
+    def size_hint(self, n: int | torch.SymInt) -> int:
+        if isinstance(n, torch.SymInt):
+            # pyre-ignore[6]
+            return int(self.shape_env.size_hint(n._sympy_()))
+        assert isinstance(n, int)
+        return n
 
     def __enter__(self) -> Self:
         assert getattr(tls, "env", None) is None, "CompileEnvironment already active"
