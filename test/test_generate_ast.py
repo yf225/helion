@@ -32,6 +32,7 @@ class TestGenerateAst(TestCase):
     def test_add1d(self):
         args = (torch.randn([4096], device="cuda"), torch.randn([4096], device="cuda"))
         code, result = code_and_output(basic_kernels.add, args, block_size=1024)
+        torch.testing.assert_close(result, args[0] + args[1])
         self.assertExpectedInline(
             code,
             """\
@@ -40,23 +41,21 @@ import triton
 from triton import language as tl
 
 @triton.jit
-def _add_kernel(_x, _y, _out, _x_size_0, _out_stride_0, _x_stride_0, _y_stride_0, _BLOCK_SIZE: tl.constexpr):
-    _offsets = tl.program_id(0) * _BLOCK_SIZE + tl.arange(0, _BLOCK_SIZE)
-    block_idx_0 = _offsets
-    _mask = _offsets < _x_size_0
-    _v_0 = tl.load(_x + block_idx_0 * _x_stride_0, _mask)
-    _v_1 = tl.load(_y + block_idx_0 * _y_stride_0, _mask)
+def _add_kernel(_x, _y, _out, _x_size_0, _out_stride_0, _x_stride_0, _y_stride_0, _BLOCK_SIZE_0: tl.constexpr):
+    _block_idx_0 = (tl.program_id(0) * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0))[:]
+    _mask_0 = _block_idx_0 < _x_size_0
+    _v_0 = tl.load(_x + _block_idx_0 * _x_stride_0, _mask_0)
+    _v_1 = tl.load(_y + _block_idx_0 * _y_stride_0, _mask_0)
     _v_2 = _v_0 + _v_1
-    tl.store(_out + block_idx_0 * _out_stride_0, _v_2, _mask)
+    tl.store(_out + _block_idx_0 * _out_stride_0, _v_2, _mask_0)
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
     out = torch.empty_like(x)
-    _BLOCK_SIZE = 1024
-    _add_kernel[triton.cdiv(x.size(0), _BLOCK_SIZE), 1, 1](x, y, out, x.size(0), out.stride(0), x.stride(0), y.stride(0), _BLOCK_SIZE)
+    _BLOCK_SIZE_0 = 1024
+    _add_kernel[triton.cdiv(x.size(0), _BLOCK_SIZE_0),](x, y, out, x.size(0), out.stride(0), x.stride(0), y.stride(0), _BLOCK_SIZE_0, num_warps=4, num_stages=3)
     return out""",
         )
-        torch.testing.assert_close(result, args[0] + args[1])
 
     def test_add2d(self):
         args = (
@@ -64,6 +63,7 @@ def add(x, y):
             torch.randn([100, 500], device="cuda"),
         )
         code, result = code_and_output(basic_kernels.add, args, block_size=1024)
+        torch.testing.assert_close(result, args[0] + args[1])
         self.assertExpectedInline(
             code,
             """\
@@ -74,22 +74,21 @@ from triton import language as tl
 @triton.jit
 def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _out_stride_0, _out_stride_1, _x_stride_0, _x_stride_1, _y_stride_0, _y_stride_1, _BLOCK_SIZE: tl.constexpr):
     _offsets = tl.program_id(0) * _BLOCK_SIZE + tl.arange(0, _BLOCK_SIZE)
-    block_idx_1 = _offsets % _x_size_1
-    block_idx_0 = _offsets // _x_size_1
+    _block_idx_1 = _offsets % _x_size_1
+    _block_idx_0 = _offsets // _x_size_1
     _mask = _offsets < _x_size_0 * _x_size_1
-    _v_0 = tl.load(_x + (block_idx_0 * _x_stride_0 + block_idx_1 * _x_stride_1), _mask)
-    _v_1 = tl.load(_y + (block_idx_0 * _y_stride_0 + block_idx_1 * _y_stride_1), _mask)
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1), _mask)
+    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1), _mask)
     _v_2 = _v_0 + _v_1
-    tl.store(_out + (block_idx_0 * _out_stride_0 + block_idx_1 * _out_stride_1), _v_2, _mask)
+    tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1), _v_2, _mask)
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
     out = torch.empty_like(x)
     _BLOCK_SIZE = 1024
-    _add_kernel[triton.cdiv(x.size(0) * x.size(1), _BLOCK_SIZE), 1, 1](x, y, out, x.size(0), x.size(1), out.stride(0), out.stride(1), x.stride(0), x.stride(1), y.stride(0), y.stride(1), _BLOCK_SIZE)
+    _add_kernel[triton.cdiv(x.size(0) * x.size(1), _BLOCK_SIZE), 1, 1](x, y, out, x.size(0), x.size(1), out.stride(0), out.stride(1), x.stride(0), x.stride(1), y.stride(0), y.stride(1), _BLOCK_SIZE, num_warps=4, num_stages=3)
     return out""",
         )
-        torch.testing.assert_close(result, args[0] + args[1])
 
     def test_add2d_loop_order(self):
         args = (
@@ -99,6 +98,7 @@ def add(x, y):
         code, result = code_and_output(
             basic_kernels.add, args, block_size=1024, loop_order=(1, 0)
         )
+        torch.testing.assert_close(result, args[0] + args[1])
         self.assertExpectedInline(
             code,
             """\
@@ -109,22 +109,21 @@ from triton import language as tl
 @triton.jit
 def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _out_stride_0, _out_stride_1, _x_stride_0, _x_stride_1, _y_stride_0, _y_stride_1, _BLOCK_SIZE: tl.constexpr):
     _offsets = tl.program_id(0) * _BLOCK_SIZE + tl.arange(0, _BLOCK_SIZE)
-    block_idx_0 = _offsets % _x_size_0
-    block_idx_1 = _offsets // _x_size_0
+    _block_idx_0 = _offsets % _x_size_0
+    _block_idx_1 = _offsets // _x_size_0
     _mask = _offsets < _x_size_0 * _x_size_1
-    _v_0 = tl.load(_x + (block_idx_0 * _x_stride_0 + block_idx_1 * _x_stride_1), _mask)
-    _v_1 = tl.load(_y + (block_idx_0 * _y_stride_0 + block_idx_1 * _y_stride_1), _mask)
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1), _mask)
+    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1), _mask)
     _v_2 = _v_0 + _v_1
-    tl.store(_out + (block_idx_0 * _out_stride_0 + block_idx_1 * _out_stride_1), _v_2, _mask)
+    tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1), _v_2, _mask)
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
     out = torch.empty_like(x)
     _BLOCK_SIZE = 1024
-    _add_kernel[triton.cdiv(x.size(0) * x.size(1), _BLOCK_SIZE), 1, 1](x, y, out, x.size(0), x.size(1), out.stride(0), out.stride(1), x.stride(0), x.stride(1), y.stride(0), y.stride(1), _BLOCK_SIZE)
+    _add_kernel[triton.cdiv(x.size(0) * x.size(1), _BLOCK_SIZE), 1, 1](x, y, out, x.size(0), x.size(1), out.stride(0), out.stride(1), x.stride(0), x.stride(1), y.stride(0), y.stride(1), _BLOCK_SIZE, num_warps=4, num_stages=3)
     return out""",
         )
-        torch.testing.assert_close(result, args[0] + args[1])
 
     def test_add3d(self):
         args = (
@@ -132,6 +131,7 @@ def add(x, y):
             torch.randn([100, 500, 10], device="cuda"),
         )
         code, result = code_and_output(basic_kernels.add, args, block_size=1024)
+        torch.testing.assert_close(result, args[0] + args[1])
         self.assertExpectedInline(
             code,
             """\
@@ -142,23 +142,22 @@ from triton import language as tl
 @triton.jit
 def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _x_size_2, _out_stride_0, _out_stride_1, _out_stride_2, _x_stride_0, _x_stride_1, _x_stride_2, _y_stride_0, _y_stride_1, _y_stride_2, _BLOCK_SIZE: tl.constexpr):
     _offsets = tl.program_id(0) * _BLOCK_SIZE + tl.arange(0, _BLOCK_SIZE)
-    block_idx_2 = _offsets % _x_size_2
-    block_idx_1 = _offsets // _x_size_2 % _x_size_1
-    block_idx_0 = _offsets // (_x_size_1 * _x_size_2)
+    _block_idx_2 = _offsets % _x_size_2
+    _block_idx_1 = _offsets // _x_size_2 % _x_size_1
+    _block_idx_0 = _offsets // (_x_size_1 * _x_size_2)
     _mask = _offsets < _x_size_0 * _x_size_1 * _x_size_2
-    _v_0 = tl.load(_x + (block_idx_0 * _x_stride_0 + block_idx_1 * _x_stride_1 + block_idx_2 * _x_stride_2), _mask)
-    _v_1 = tl.load(_y + (block_idx_0 * _y_stride_0 + block_idx_1 * _y_stride_1 + block_idx_2 * _y_stride_2), _mask)
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask)
+    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask)
     _v_2 = _v_0 + _v_1
-    tl.store(_out + (block_idx_0 * _out_stride_0 + block_idx_1 * _out_stride_1 + block_idx_2 * _out_stride_2), _v_2, _mask)
+    tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1 + _block_idx_2 * _out_stride_2), _v_2, _mask)
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
     out = torch.empty_like(x)
     _BLOCK_SIZE = 1024
-    _add_kernel[triton.cdiv(x.size(0) * x.size(1) * x.size(2), _BLOCK_SIZE), 1, 1](x, y, out, x.size(0), x.size(1), x.size(2), out.stride(0), out.stride(1), out.stride(2), x.stride(0), x.stride(1), x.stride(2), y.stride(0), y.stride(1), y.stride(2), _BLOCK_SIZE)
+    _add_kernel[triton.cdiv(x.size(0) * x.size(1) * x.size(2), _BLOCK_SIZE), 1, 1](x, y, out, x.size(0), x.size(1), x.size(2), out.stride(0), out.stride(1), out.stride(2), x.stride(0), x.stride(1), x.stride(2), y.stride(0), y.stride(1), y.stride(2), _BLOCK_SIZE, num_warps=4, num_stages=3)
     return out""",
         )
-        torch.testing.assert_close(result, args[0] + args[1])
 
     def test_add3d_reorder(self):
         args = (
@@ -168,6 +167,7 @@ def add(x, y):
         code, result = code_and_output(
             basic_kernels.add, args, block_size=1024, loop_order=(2, 0, 1)
         )
+        torch.testing.assert_close(result, args[0] + args[1])
         self.assertExpectedInline(
             code,
             """\
@@ -178,23 +178,177 @@ from triton import language as tl
 @triton.jit
 def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _x_size_2, _out_stride_0, _out_stride_1, _out_stride_2, _x_stride_0, _x_stride_1, _x_stride_2, _y_stride_0, _y_stride_1, _y_stride_2, _BLOCK_SIZE: tl.constexpr):
     _offsets = tl.program_id(0) * _BLOCK_SIZE + tl.arange(0, _BLOCK_SIZE)
-    block_idx_1 = _offsets % _x_size_1
-    block_idx_0 = _offsets // _x_size_1 % _x_size_0
-    block_idx_2 = _offsets // (_x_size_0 * _x_size_1)
+    _block_idx_1 = _offsets % _x_size_1
+    _block_idx_0 = _offsets // _x_size_1 % _x_size_0
+    _block_idx_2 = _offsets // (_x_size_0 * _x_size_1)
     _mask = _offsets < _x_size_0 * _x_size_1 * _x_size_2
-    _v_0 = tl.load(_x + (block_idx_0 * _x_stride_0 + block_idx_1 * _x_stride_1 + block_idx_2 * _x_stride_2), _mask)
-    _v_1 = tl.load(_y + (block_idx_0 * _y_stride_0 + block_idx_1 * _y_stride_1 + block_idx_2 * _y_stride_2), _mask)
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask)
+    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask)
     _v_2 = _v_0 + _v_1
-    tl.store(_out + (block_idx_0 * _out_stride_0 + block_idx_1 * _out_stride_1 + block_idx_2 * _out_stride_2), _v_2, _mask)
+    tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1 + _block_idx_2 * _out_stride_2), _v_2, _mask)
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
     out = torch.empty_like(x)
     _BLOCK_SIZE = 1024
-    _add_kernel[triton.cdiv(x.size(0) * x.size(1) * x.size(2), _BLOCK_SIZE), 1, 1](x, y, out, x.size(0), x.size(1), x.size(2), out.stride(0), out.stride(1), out.stride(2), x.stride(0), x.stride(1), x.stride(2), y.stride(0), y.stride(1), y.stride(2), _BLOCK_SIZE)
+    _add_kernel[triton.cdiv(x.size(0) * x.size(1) * x.size(2), _BLOCK_SIZE), 1, 1](x, y, out, x.size(0), x.size(1), x.size(2), out.stride(0), out.stride(1), out.stride(2), x.stride(0), x.stride(1), x.stride(2), y.stride(0), y.stride(1), y.stride(2), _BLOCK_SIZE, num_warps=4, num_stages=3)
     return out""",
         )
+
+    def test_add_tilend0(self):
+        args = (
+            torch.randn([512, 512, 512], device="cuda"),
+            torch.randn([512, 512, 512], device="cuda"),
+        )
+        code, result = code_and_output(
+            basic_kernels.add, args, block_size=[8, 16, 32], loop_order=(0, 1, 2)
+        )
         torch.testing.assert_close(result, args[0] + args[1])
+        self.assertExpectedInline(
+            code,
+            """\
+import torch
+import triton
+from triton import language as tl
+
+@triton.jit
+def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _x_size_2, _out_stride_0, _out_stride_1, _out_stride_2, _x_stride_0, _x_stride_1, _x_stride_2, _y_stride_0, _y_stride_1, _y_stride_2, _BLOCK_SIZE_0: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr):
+    _block_idx_0 = (tl.program_id(0) * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0))[:, None, None]
+    _mask_0 = _block_idx_0 < _x_size_0
+    _block_idx_1 = (tl.program_id(1) * _BLOCK_SIZE_1 + tl.arange(0, _BLOCK_SIZE_1))[None, :, None]
+    _mask_1 = _block_idx_1 < _x_size_1
+    _block_idx_2 = (tl.program_id(2) * _BLOCK_SIZE_2 + tl.arange(0, _BLOCK_SIZE_2))[None, None, :]
+    _mask_2 = _block_idx_2 < _x_size_2
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask_0 | _mask_1 | _mask_2)
+    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask_0 | _mask_1 | _mask_2)
+    _v_2 = _v_0 + _v_1
+    tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1 + _block_idx_2 * _out_stride_2), _v_2, _mask_0 | _mask_1 | _mask_2)
+
+def add(x, y):
+    x, y = torch.broadcast_tensors(x, y)
+    out = torch.empty_like(x)
+    _BLOCK_SIZE_0 = 8
+    _BLOCK_SIZE_1 = 16
+    _BLOCK_SIZE_2 = 32
+    _add_kernel[triton.cdiv(x.size(0), _BLOCK_SIZE_0), triton.cdiv(x.size(1), _BLOCK_SIZE_1), triton.cdiv(x.size(2), _BLOCK_SIZE_2)](x, y, out, x.size(0), x.size(1), x.size(2), out.stride(0), out.stride(1), out.stride(2), x.stride(0), x.stride(1), x.stride(2), y.stride(0), y.stride(1), y.stride(2), _BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2, num_warps=4, num_stages=3)
+    return out""",
+        )
+
+    def test_add_tilend1(self):
+        args = (
+            torch.randn([512, 512, 512], device="cuda"),
+            torch.randn([512, 512, 512], device="cuda"),
+        )
+        code, result = code_and_output(
+            basic_kernels.add, args, block_size=[8, 16, 32], loop_order=(2, 1, 0)
+        )
+        torch.testing.assert_close(result, args[0] + args[1])
+        self.assertExpectedInline(
+            code,
+            """\
+import torch
+import triton
+from triton import language as tl
+
+@triton.jit
+def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _x_size_2, _out_stride_0, _out_stride_1, _out_stride_2, _x_stride_0, _x_stride_1, _x_stride_2, _y_stride_0, _y_stride_1, _y_stride_2, _BLOCK_SIZE_0: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr):
+    _block_idx_2 = (tl.program_id(0) * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0))[:, None, None]
+    _mask_0 = _block_idx_2 < _x_size_2
+    _block_idx_1 = (tl.program_id(1) * _BLOCK_SIZE_1 + tl.arange(0, _BLOCK_SIZE_1))[None, :, None]
+    _mask_1 = _block_idx_1 < _x_size_1
+    _block_idx_0 = (tl.program_id(2) * _BLOCK_SIZE_2 + tl.arange(0, _BLOCK_SIZE_2))[None, None, :]
+    _mask_2 = _block_idx_0 < _x_size_0
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask_0 | _mask_1 | _mask_2)
+    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask_0 | _mask_1 | _mask_2)
+    _v_2 = _v_0 + _v_1
+    tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1 + _block_idx_2 * _out_stride_2), _v_2, _mask_0 | _mask_1 | _mask_2)
+
+def add(x, y):
+    x, y = torch.broadcast_tensors(x, y)
+    out = torch.empty_like(x)
+    _BLOCK_SIZE_0 = 32
+    _BLOCK_SIZE_1 = 16
+    _BLOCK_SIZE_2 = 8
+    _add_kernel[triton.cdiv(x.size(2), _BLOCK_SIZE_0), triton.cdiv(x.size(1), _BLOCK_SIZE_1), triton.cdiv(x.size(0), _BLOCK_SIZE_2)](x, y, out, x.size(0), x.size(1), x.size(2), out.stride(0), out.stride(1), out.stride(2), x.stride(0), x.stride(1), x.stride(2), y.stride(0), y.stride(1), y.stride(2), _BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2, num_warps=4, num_stages=3)
+    return out""",
+        )
+
+    def test_add_tilend2(self):
+        args = (
+            torch.randn([512, 512, 512], device="cuda"),
+            torch.randn([512, 512, 512], device="cuda"),
+        )
+        code, result = code_and_output(
+            basic_kernels.add, args, block_size=[1, 32, 32], loop_order=(0, 1, 2)
+        )
+        torch.testing.assert_close(result, args[0] + args[1])
+        self.assertExpectedInline(
+            code,
+            """\
+import torch
+import triton
+from triton import language as tl
+
+@triton.jit
+def _add_kernel(_x, _y, _out, _x_size_1, _x_size_2, _out_stride_0, _out_stride_1, _out_stride_2, _x_stride_0, _x_stride_1, _x_stride_2, _y_stride_0, _y_stride_1, _y_stride_2, _BLOCK_SIZE_1: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr):
+    _block_idx_0 = tl.program_id(0)
+    _block_idx_1 = (tl.program_id(1) * _BLOCK_SIZE_1 + tl.arange(0, _BLOCK_SIZE_1))[:, None]
+    _mask_0 = _block_idx_1 < _x_size_1
+    _block_idx_2 = (tl.program_id(2) * _BLOCK_SIZE_2 + tl.arange(0, _BLOCK_SIZE_2))[None, :]
+    _mask_1 = _block_idx_2 < _x_size_2
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask_0 | _mask_1)
+    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask_0 | _mask_1)
+    _v_2 = _v_0 + _v_1
+    tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1 + _block_idx_2 * _out_stride_2), _v_2, _mask_0 | _mask_1)
+
+def add(x, y):
+    x, y = torch.broadcast_tensors(x, y)
+    out = torch.empty_like(x)
+    _BLOCK_SIZE_1 = 32
+    _BLOCK_SIZE_2 = 32
+    _add_kernel[x.size(0), triton.cdiv(x.size(1), _BLOCK_SIZE_1), triton.cdiv(x.size(2), _BLOCK_SIZE_2)](x, y, out, x.size(1), x.size(2), out.stride(0), out.stride(1), out.stride(2), x.stride(0), x.stride(1), x.stride(2), y.stride(0), y.stride(1), y.stride(2), _BLOCK_SIZE_1, _BLOCK_SIZE_2, num_warps=4, num_stages=3)
+    return out""",
+        )
+
+    def test_add_tilend3(self):
+        args = (
+            torch.randn([512, 512, 512], device="cuda"),
+            torch.randn([512, 512, 512], device="cuda"),
+        )
+        code, result = code_and_output(
+            basic_kernels.add,
+            args,
+            block_size=[1, 32, 1],
+            loop_order=(0, 2, 1),
+            num_warps=8,
+            num_stages=1,
+        )
+        torch.testing.assert_close(result, args[0] + args[1])
+        self.assertExpectedInline(
+            code,
+            """\
+import torch
+import triton
+from triton import language as tl
+
+@triton.jit
+def _add_kernel(_x, _y, _out, _x_size_1, _out_stride_0, _out_stride_1, _out_stride_2, _x_stride_0, _x_stride_1, _x_stride_2, _y_stride_0, _y_stride_1, _y_stride_2, _BLOCK_SIZE_2: tl.constexpr):
+    _block_idx_0 = tl.program_id(0)
+    _block_idx_2 = tl.program_id(1)
+    _block_idx_1 = (tl.program_id(2) * _BLOCK_SIZE_2 + tl.arange(0, _BLOCK_SIZE_2))[:]
+    _mask_0 = _block_idx_1 < _x_size_1
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask_0)
+    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask_0)
+    _v_2 = _v_0 + _v_1
+    tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1 + _block_idx_2 * _out_stride_2), _v_2, _mask_0)
+
+def add(x, y):
+    x, y = torch.broadcast_tensors(x, y)
+    out = torch.empty_like(x)
+    _BLOCK_SIZE_2 = 32
+    _add_kernel[x.size(0), x.size(2), triton.cdiv(x.size(1), _BLOCK_SIZE_2)](x, y, out, x.size(1), out.stride(0), out.stride(1), out.stride(2), x.stride(0), x.stride(1), x.stride(2), y.stride(0), y.stride(1), y.stride(2), _BLOCK_SIZE_2, num_warps=8, num_stages=1)
+    return out""",
+        )
 
 
 if __name__ == "__main__":

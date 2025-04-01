@@ -101,6 +101,10 @@ class CantReadOnDevice(BaseError):
     message = "Can not read {0!s} inside the `hl.tile` or `hl.grid` loop."
 
 
+class MaximumGridRank(BaseError):
+    message = "Grid can have at most 3 dimensions, got {0}."
+
+
 class ExpectedTensorName(BaseError):
     message = "Expected tensor name, got {0!s}."
 

@@ -206,6 +206,12 @@ class DeviceFunction:
 
     def codegen_function_call(self) -> ast.AST:
         args = [arg.host_str() for arg in self.sorted_args()]
+        args.extend(
+            [
+                f"num_warps={self.config.num_warps}",
+                f"num_stages={self.config.num_stages}",
+            ]
+        )
         grid_expr = self.grid_expr
         assert grid_expr is not None
         # TODO(jansel): we should run CSE this statement

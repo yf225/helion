@@ -69,9 +69,13 @@ class ConfigSpec:
                 )
                 idx += expected
             elif isinstance(val, int):
-                if not block_spec.can_be_int():
-                    raise InvalidConfig(f"Block sizes must be list, got {val!r}")
-                new_block_sizes.append(assert_integer_power_of_two(val))
+                if len(block_spec) == 1:
+                    # go down the more general NDTileStrategy path
+                    new_block_sizes.append([assert_integer_power_of_two(val)])
+                else:
+                    if not block_spec.can_be_int():
+                        raise InvalidConfig(f"Block sizes must be list, got {val!r}")
+                    new_block_sizes.append(assert_integer_power_of_two(val))
                 idx += 1
             elif isinstance(val, (list, tuple)):
                 if len(val) != expected:
