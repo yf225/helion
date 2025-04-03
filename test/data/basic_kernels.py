@@ -10,3 +10,11 @@ def add(x, y):
     for tile in hl.tile(out.size()):
         out[tile] = x[tile] + y[tile]
     return out
+
+
+@helion.kernel
+def torch_ops_pointwise(x, y):
+    out = torch.empty_like(x)
+    for tile in hl.tile(out.size()):
+        out[tile] = torch.sigmoid(torch.add(torch.sin(x[tile]), torch.cos(y[tile])))
+    return out

@@ -143,5 +143,4 @@ class PermutationSpec(NamedTuple):
         return ordering
 
     def default(self) -> list[int]:
-        # default order is reversed to match torch.tensor indexing
         return [*range(self.length)]

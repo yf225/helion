@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import functools
+import inspect
 from typing import TYPE_CHECKING
 from typing import Callable
 from typing import NamedTuple
@@ -16,6 +17,7 @@ from .ast_extension import expr_from_string
 from .ast_extension import statement_from_string
 from .compile_environment import CompileEnvironment
 from .device_function import DeviceFunction
+from .inductor_lowering import codegen_call_with_graph
 from .type_propagation import CallableType
 from .type_propagation import SequenceType
 from .type_propagation import TensorType
@@ -34,6 +36,7 @@ OUTPUT_CODE_HEADER = """\
 import torch
 import triton
 from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
 
 """
 
@@ -92,7 +95,7 @@ class GenerateAST(ast.NodeVisitor):
     def tmpvar(self) -> str:
         return self.device_function.unique_name("v")
 
-    def lift(self, expr: ast.AST) -> ast.AST:
+    def lift(self, expr: ast.AST) -> ast.Name:
         if isinstance(expr, ast.Name):
             return expr
         assert isinstance(expr, ExtendedAST)
@@ -174,12 +177,34 @@ class GenerateAST(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
         assert isinstance(node.func, ExtendedAST)
-        if (
-            isinstance(fn_type := node.func._type_info, CallableType)
-            and is_api_func(api := fn_type.value)
-            and api._codegen is not None
-        ):
-            return api._codegen(CodegenState(node, node._type_info, self))
+        if isinstance(fn_type := node.func._type_info, CallableType):
+            if is_api_func(api := fn_type.value) and api._codegen is not None:
+                return api._codegen(CodegenState(node, node._type_info, self))
+            if self.on_device and fn_type.graph is not None:
+                args: list[ast.AST] = []
+                kwargs = {}
+                for arg in node.args:
+                    if isinstance(arg, ast.Starred):
+                        with arg:
+                            raise exc.StarredArgsNotSupportedOnDevice
+                    else:
+                        args.append(self.lift(self.visit(arg)))
+                for kwarg in node.keywords:
+                    if kwarg.arg is None:
+                        with kwarg.value:
+                            raise exc.StarredArgsNotSupportedOnDevice
+                    else:
+                        kwargs[kwarg.arg] = self.visit(self.lift(kwarg.value))
+                if kwargs:
+                    bound = inspect.signature(fn_type.value).bind(*args, **kwargs)
+                    bound.apply_defaults()
+                    args = [*bound.arguments.values()]
+                    for i, arg in enumerate(args):
+                        if not isinstance(arg, ast.AST):
+                            # a default arg?
+                            args[i] = expr_from_string(repr(arg))
+                    del kwargs
+                return codegen_call_with_graph(self, fn_type.graph, args)
         return self.generic_visit(node)
 
     @device_only

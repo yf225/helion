@@ -28,6 +28,7 @@ from .compile_environment import CompileEnvironment
 from .compile_environment import warning
 from .host_function import HostFunction
 from .host_function import SymbolOrigin
+from .inductor_lowering import process_graph_in_type_propagation
 from .source_location import SourceLocation
 from .source_location import current_location
 from .variable_origin import ArgumentOrigin
@@ -231,7 +232,7 @@ class TypeInfo:
         """Combine two types at a join point in control flow."""
         if isinstance(other, UnknownType):
             return other
-        if isinstance(other, NoType):
+        if isinstance(other, NoType) or self == other:
             return self
         return UnknownType(
             debug_msg=f"Can't combine types from control flow: {self!s} and {other!s}",
@@ -406,6 +407,8 @@ class TensorType(TypeInfo):
                 rhs_rank = value.fake_value.ndim
                 if lhs_rank != rhs_rank:
                     raise exc.RankMismatch(lhs_rank, rhs_rank)
+            elif isinstance(value, UnknownType):
+                raise exc.TypePropagationError(value)
             else:
                 raise exc.RequiresTensorInAssignment(value)
         return self
@@ -541,6 +544,8 @@ class LiteralType(TypeInfo):
         return bool(self.value)
 
     def merge(self, other: TypeInfo) -> TypeInfo:
+        if type(other) is type(self) and self.value is other.value:
+            return self
         if isinstance(other, (LiteralType, NumericType)):
             if NumericType.known_equal(other.value, self.value):
                 return self
@@ -640,17 +645,24 @@ class CallableType(LiteralType):
                 return output_type
 
             if proxy_kwargs:
-                bound = inspect.signature(self.value).bind(*proxy_args, **proxy_kwargs)
+                signature = inspect.signature(self.value)
+                assert not any(
+                    param.kind == inspect.Parameter.KEYWORD_ONLY
+                    for param in signature.parameters.values()
+                )
+                bound = signature.bind(*proxy_args, **proxy_kwargs)
                 bound.apply_defaults()
                 proxy_args = [*bound.arguments.values()]
                 del proxy_kwargs
 
             # TODO(jansel): lift closures
-            self.graph = make_fx(self.value, decomposition_table=select_decomp_table())(
-                *proxy_args
-            )
+            self.graph = graph = make_fx(
+                self.value, decomposition_table=select_decomp_table()
+            )(*proxy_args)
             if origin.is_host():
                 self._warn_graph_contains_disallowed_host_ops()
+            else:
+                process_graph_in_type_propagation(graph)
             return output_type
         except Exception as e:
             # TODO(jansel): point to other tracing modes
@@ -1276,7 +1288,9 @@ class TypePropagation(ast.NodeVisitor):
                 if self.device_loop_depth > 0 and isinstance(
                     type_info, TypeNotAllowedOnDevice
                 ):
-                    CompileEnvironment.current().errors.add_type_error(type_info)
+                    # We could defer this error with:
+                    # CompileEnvironment.current().errors.add_type_error(type_info)
+                    raise exc.TypePropagationError(type_info)
                 return node.update_type_info(type_info)
             except exc.Base:
                 raise

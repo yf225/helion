@@ -113,6 +113,10 @@ class UndefinedVariable(BaseError):
     message = "{} is not defined."
 
 
+class StarredArgsNotSupportedOnDevice(BaseError):
+    message = "*/** args are not supported inside the `hl.tile` or `hl.grid` loop."
+
+
 class TypePropagationError(BaseError):
     message = "{}"
 
@@ -136,6 +140,10 @@ class TypePropagationError(BaseError):
         )
         super(_FixedMessage, self).__init__(msg)
 
+    @property
+    def location(self) -> SourceLocation:
+        return self.locations[0]
+
     def __str__(self) -> str:
         msg = super().__str__()
         if len(self.similar_errors) > 1:
@@ -155,6 +163,10 @@ class _WrapException(BaseError):
 
 
 class InvalidConfig(BaseError):
+    message = "{}"
+
+
+class InductorLoweringError(BaseError):
     message = "{}"
 
 

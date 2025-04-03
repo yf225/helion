@@ -39,6 +39,7 @@ class TestGenerateAst(TestCase):
 import torch
 import triton
 from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
 def _add_kernel(_x, _y, _out, _x_size_0, _out_stride_0, _x_stride_0, _y_stride_0, _BLOCK_SIZE_0: tl.constexpr):
@@ -70,6 +71,7 @@ def add(x, y):
 import torch
 import triton
 from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
 def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _out_stride_0, _out_stride_1, _x_stride_0, _x_stride_1, _y_stride_0, _y_stride_1, _BLOCK_SIZE: tl.constexpr):
@@ -105,6 +107,7 @@ def add(x, y):
 import torch
 import triton
 from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
 def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _out_stride_0, _out_stride_1, _x_stride_0, _x_stride_1, _y_stride_0, _y_stride_1, _BLOCK_SIZE: tl.constexpr):
@@ -138,6 +141,7 @@ def add(x, y):
 import torch
 import triton
 from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
 def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _x_size_2, _out_stride_0, _out_stride_1, _out_stride_2, _x_stride_0, _x_stride_1, _x_stride_2, _y_stride_0, _y_stride_1, _y_stride_2, _BLOCK_SIZE: tl.constexpr):
@@ -174,6 +178,7 @@ def add(x, y):
 import torch
 import triton
 from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
 def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _x_size_2, _out_stride_0, _out_stride_1, _out_stride_2, _x_stride_0, _x_stride_1, _x_stride_2, _y_stride_0, _y_stride_1, _y_stride_2, _BLOCK_SIZE: tl.constexpr):
@@ -210,6 +215,7 @@ def add(x, y):
 import torch
 import triton
 from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
 def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _x_size_2, _out_stride_0, _out_stride_1, _out_stride_2, _x_stride_0, _x_stride_1, _x_stride_2, _y_stride_0, _y_stride_1, _y_stride_2, _BLOCK_SIZE_0: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr):
@@ -249,6 +255,7 @@ def add(x, y):
 import torch
 import triton
 from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
 def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _x_size_2, _out_stride_0, _out_stride_1, _out_stride_2, _x_stride_0, _x_stride_1, _x_stride_2, _y_stride_0, _y_stride_1, _y_stride_2, _BLOCK_SIZE_0: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr):
@@ -288,6 +295,7 @@ def add(x, y):
 import torch
 import triton
 from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
 def _add_kernel(_x, _y, _out, _x_size_1, _x_size_2, _out_stride_0, _out_stride_1, _out_stride_2, _x_stride_0, _x_stride_1, _x_stride_2, _y_stride_0, _y_stride_1, _y_stride_2, _BLOCK_SIZE_1: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr):
@@ -330,6 +338,7 @@ def add(x, y):
 import torch
 import triton
 from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
 def _add_kernel(_x, _y, _out, _x_size_1, _out_stride_0, _out_stride_1, _out_stride_2, _x_stride_0, _x_stride_1, _x_stride_2, _y_stride_0, _y_stride_1, _y_stride_2, _BLOCK_SIZE_2: tl.constexpr):
@@ -347,6 +356,46 @@ def add(x, y):
     out = torch.empty_like(x)
     _BLOCK_SIZE_2 = 32
     _add_kernel[x.size(0), x.size(2), triton.cdiv(x.size(1), _BLOCK_SIZE_2)](x, y, out, x.size(1), out.stride(0), out.stride(1), out.stride(2), x.stride(0), x.stride(1), x.stride(2), y.stride(0), y.stride(1), y.stride(2), _BLOCK_SIZE_2, num_warps=8, num_stages=1)
+    return out""",
+        )
+
+    def test_torch_ops_pointwise(self):
+        args = (
+            torch.randn([1024], device="cuda"),
+            torch.randn([1024], device="cuda"),
+        )
+        code, result = code_and_output(
+            basic_kernels.torch_ops_pointwise,
+            args,
+            block_size=128,
+        )
+        torch.testing.assert_close(
+            result, torch.sigmoid(torch.add(torch.sin(args[0]), torch.cos(args[1])))
+        )
+        self.assertExpectedInline(
+            code,
+            """\
+import torch
+import triton
+from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
+
+@triton.jit
+def _torch_ops_pointwise_kernel(_x, _y, _out, _x_size_0, _out_stride_0, _x_stride_0, _y_stride_0, _BLOCK_SIZE_0: tl.constexpr):
+    _block_idx_0 = (tl.program_id(0) * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0))[:]
+    _mask_0 = _block_idx_0 < _x_size_0
+    _v_0 = tl.load(_x + _block_idx_0 * _x_stride_0, _mask_0)
+    _v_1 = tl_math.sin(_v_0)
+    _v_2 = tl.load(_y + _block_idx_0 * _y_stride_0, _mask_0)
+    _v_3 = tl_math.cos(_v_2)
+    _v_4 = _v_1 + _v_3
+    _v_5 = tl.sigmoid(_v_4)
+    tl.store(_out + _block_idx_0 * _out_stride_0, _v_5, _mask_0)
+
+def torch_ops_pointwise(x, y):
+    out = torch.empty_like(x)
+    _BLOCK_SIZE_0 = 128
+    _torch_ops_pointwise_kernel[triton.cdiv(x.size(0), _BLOCK_SIZE_0),](x, y, out, x.size(0), out.stride(0), x.stride(0), y.stride(0), _BLOCK_SIZE_0, num_warps=4, num_stages=3)
     return out""",
         )
 
