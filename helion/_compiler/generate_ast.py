@@ -3,12 +3,12 @@ from __future__ import annotations
 import ast
 import contextlib
 import functools
-import inspect
 from typing import TYPE_CHECKING
 from typing import Callable
 from typing import NamedTuple
 
 from .. import exc
+from ..language._decorators import APIFunc
 from ..language._decorators import is_api_func
 from .ast_extension import ExtendedAST
 from .ast_extension import LoopType
@@ -27,6 +27,8 @@ from .type_propagation import TypeInfo
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    import torch
+
     from ..runtime import Config
     from .host_function import HostFunction
     from .tile_strategy import TileStrategy
@@ -42,9 +44,22 @@ from torch._inductor.runtime.triton_helpers import math as tl_math
 
 
 class CodegenState(NamedTuple):
-    node: ast.AST
-    type_info: TypeInfo
     codegen: GenerateAST
+    type_info: TypeInfo | None = None
+    ast_node: ast.AST | None = None
+    fx_node: torch.fx.Node | None = None
+    proxy_args: list[object] | None = None
+
+    def proxy_arg(self, i: int) -> object:
+        assert self.proxy_args is not None
+        return self.proxy_args[i]
+
+    @property
+    def fake_value(self) -> object:
+        if self.fx_node is not None:
+            return self.fx_node.meta["val"]
+        assert self.type_info is not None
+        return self.type_info.proxy()
 
     @property
     def device_function(self) -> DeviceFunction:
@@ -179,33 +194,61 @@ class GenerateAST(ast.NodeVisitor):
         assert isinstance(node.func, ExtendedAST)
         if isinstance(fn_type := node.func._type_info, CallableType):
             if is_api_func(api := fn_type.value) and api._codegen is not None:
-                return api._codegen(CodegenState(node, node._type_info, self))
-            if self.on_device and fn_type.graph is not None:
-                args: list[ast.AST] = []
-                kwargs = {}
+                return api._codegen(
+                    CodegenState(
+                        self,
+                        ast_node=node,
+                        type_info=node._type_info,
+                        proxy_args=self._get_proxy_args(api, node),
+                    )
+                )
+            if self.on_device and node._graph is not None:
+                tensor_args: list[ast.AST] = []
                 for arg in node.args:
                     if isinstance(arg, ast.Starred):
                         with arg:
                             raise exc.StarredArgsNotSupportedOnDevice
-                    else:
-                        args.append(self.lift(self.visit(arg)))
+                    arg_ast = self.visit(arg)
+                    if arg._type_info.contains_tensor():
+                        assert isinstance(arg._type_info, TensorType), (
+                            "TODO: tensor in collection"
+                        )
+                        tensor_args.append(self.lift(arg_ast))
                 for kwarg in node.keywords:
                     if kwarg.arg is None:
                         with kwarg.value:
                             raise exc.StarredArgsNotSupportedOnDevice
-                    else:
-                        kwargs[kwarg.arg] = self.visit(self.lift(kwarg.value))
-                if kwargs:
-                    bound = inspect.signature(fn_type.value).bind(*args, **kwargs)
-                    bound.apply_defaults()
-                    args = [*bound.arguments.values()]
-                    for i, arg in enumerate(args):
-                        if not isinstance(arg, ast.AST):
-                            # a default arg?
-                            args[i] = expr_from_string(repr(arg))
-                    del kwargs
-                return codegen_call_with_graph(self, fn_type.graph, args)
+                    arg = kwarg.value
+                    arg_ast = self.visit(arg)
+                    if arg._type_info.contains_tensor():
+                        assert isinstance(arg._type_info, TensorType), (
+                            "TODO: tensor in collection"
+                        )
+                        tensor_args.append(self.lift(arg_ast))
+                return codegen_call_with_graph(self, node._graph, tensor_args)
         return self.generic_visit(node)
+
+    def _get_proxy_args(self, api: APIFunc, node: ast.Call) -> list[object] | None:
+        args = []
+        kwargs = {}
+        try:
+            for arg in node.args:
+                assert isinstance(arg, ExtendedAST)
+                if isinstance(arg, ast.Starred):
+                    with arg:
+                        raise exc.StarredArgsNotSupportedOnDevice
+                args.append(arg._type_info.proxy())
+            for kwarg in node.keywords:
+                assert isinstance(kwarg.value, ExtendedAST)
+                if kwarg.arg is None:
+                    with kwarg.value:
+                        raise exc.StarredArgsNotSupportedOnDevice
+                kwargs[kwarg.arg] = kwarg.value._type_info.proxy()
+        except NotImplementedError:
+            return None
+        bound = api._signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        return [*bound.arguments.values()]
 
     @device_only
     def visit_Name(self, node: ast.Name) -> ast.AST:
@@ -216,10 +259,8 @@ class GenerateAST(ast.NodeVisitor):
             and isinstance(node.ctx, ast.Load)
             and type_info.origin.is_host()
         ):
-            assert isinstance(type_info, TensorType), (
-                f"TODO: handle other types {type_info}"
-            )
-            return self.tensor_reference(node).node
+            if isinstance(type_info, TensorType):
+                return self.tensor_reference(node).node
         return self.generic_visit(node)
 
     visit_AnnAssign = _not_supported_on_device
@@ -259,7 +300,8 @@ class GenerateAST(ast.NodeVisitor):
         indexing = self.subscript_indexing(node)
         return self.lift(
             expr_from_string(
-                "tl.load(name + offset, mask)",
+                # TODO(jansel): optimize away mask/other?
+                "tl.load(name + offset, mask, other=0)",
                 name=indexing.tensor_ref.node,
                 offset=indexing.index_expr,
                 mask=indexing.mask_expr,

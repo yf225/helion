@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import textwrap
 import threading
 import typing
 from typing import TYPE_CHECKING
@@ -50,7 +51,9 @@ class HostFunction:
         self.symbol_to_origin: dict[str, SymbolOrigin] = {}
         self.tensor_to_origin: dict[torch.Tensor, Origin] = {}
         with self:
-            source = inspect.getsource(fn)
+            source_indented = inspect.getsource(fn)
+            source = textwrap.dedent(source_indented)
+            self.column_offset: int = source_indented.index(source[0])
             root = ast.parse(source)
             assert isinstance(root, ast.Module)
             (root,) = root.body
@@ -65,6 +68,7 @@ class HostFunction:
             from .type_propagation import propagate_types
 
             propagate_types(self, fake_args)
+            CompileEnvironment.current().finalize_config_spec()
             # TODO(jansel): assert we don't have any extra decorators
             # TODO(jansel): check type annotations for hl.constexpr/hl.specialize
 

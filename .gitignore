@@ -83,3 +83,4 @@ venv
 .watchman
 .watchmanconfig
 *.zip
+scratch.py

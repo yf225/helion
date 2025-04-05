@@ -117,6 +117,14 @@ class StarredArgsNotSupportedOnDevice(BaseError):
     message = "*/** args are not supported inside the `hl.tile` or `hl.grid` loop."
 
 
+class IncorrectTileUsage(BaseError):
+    message = "Tiles can only be used in tensor indexing (`x[tile]`) or in `hl.*` ops (e.g. `hl.zeros(tile)`), used in {}"
+
+
+class TracedArgNotSupported(BaseError):
+    message = "{!s} is not supported as an arg to traced functions."
+
+
 class TypePropagationError(BaseError):
     message = "{}"
 
@@ -153,6 +161,10 @@ class TypePropagationError(BaseError):
 
 class ErrorCompilingKernel(BaseError):
     message = "{0} errors and {1} warnings occurred (see above)"
+
+
+class NoTensorArgs(BaseError):
+    message = "Kernel took no tensor args, unclear what device to use."
 
 
 class _WrapException(BaseError):
@@ -197,3 +209,7 @@ class TensorOperationsInHostCall(TensorOperationInWrapper):
         "A tensor operation outside of the `hl.tile` or `hl.grid` loop will not be fused "
         "in the generated kernel: {}"
     )
+
+
+class WrongDevice(BaseWarning):
+    message = "Operation {0} returned a tensor on {1} device, but the kernel is on {2} device. "

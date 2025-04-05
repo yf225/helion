@@ -24,6 +24,8 @@ from torch.fx.node import Node
 from torch.fx.node import map_arg
 
 from ..exc import InductorLoweringError
+from ..language._decorators import APIFunc
+from ..language._decorators import is_api_func
 from .ast_extension import expr_from_string
 from .compile_environment import CompileEnvironment
 
@@ -39,7 +41,11 @@ def process_graph_in_type_propagation(gm: torch.fx.GraphModule) -> None:
         # pyre-ignore[19]
         with V.set_graph_handler(graph_lowering):
             for node in gm.graph.nodes:
-                assert node.op in {"call_function", "placeholder", "output"}, node.op
+                assert node.op in {
+                    "call_function",
+                    "placeholder",
+                    "output",
+                }, node.op
                 if node.op == "call_function":
                     prior_buffers = len(graph_lowering.buffers)
                     node.meta["lowering"] = process_node_in_type_propagation(
@@ -54,7 +60,10 @@ def process_graph_in_type_propagation(gm: torch.fx.GraphModule) -> None:
 def process_node_in_type_propagation(
     graph_lowering: GraphLowering,
     node: Node,
-) -> InductorLowering:
+) -> Lowering:
+    if is_api_func(node.target):
+        return APIFuncLowering(node.target, node)
+
     def convert_arg(arg: Node) -> TensorBox:
         example = arg.meta["val"]
         input_names.append(name := f"{node.name}_input{len(input_names)}")
@@ -103,10 +112,23 @@ def _unpack_symint(x: torch.SymInt | int) -> sympy.Expr:
     raise TypeError(f"Expected SymInt or int, got {type(x)}")
 
 
+class Lowering:
+    def codegen(self, cg: GenerateAST, input_asts: list[ast.AST]) -> ast.AST:
+        raise NotImplementedError
+
+    @property
+    def num_inputs(self) -> int:
+        raise NotImplementedError
+
+
 @dataclasses.dataclass
-class InductorLowering:
+class InductorLowering(Lowering):
     buffer: ComputedBuffer
     input_names: list[str]
+
+    @property
+    def num_inputs(self) -> int:
+        return len(self.input_names)
 
     def codegen(self, cg: GenerateAST, input_asts: list[ast.AST]) -> ast.AST:
         raise NotImplementedError(
@@ -129,6 +151,29 @@ class PointwiseLowering(InductorLowering):
 
 class ReductionLowering(InductorLowering):
     pass
+
+
+@dataclasses.dataclass
+class APIFuncLowering(Lowering):
+    api_func: APIFunc
+    node: torch.fx.Node
+
+    def codegen(self, cg: GenerateAST, input_asts: list[ast.AST]) -> ast.AST:
+        from .generate_ast import CodegenState
+
+        args, kwargs = map_arg(
+            (self.node.args, self.node.kwargs), lambda arg: arg.meta["val"]
+        )
+        bound = self.api_func._signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        assert self.api_func._codegen is not None
+        return self.api_func._codegen(
+            CodegenState(cg, fx_node=self.node, proxy_args=[*bound.arguments.values()])
+        )
+
+    @property
+    def num_inputs(self) -> int:
+        return len(self.node._input_nodes)
 
 
 class GenerateASTFromInductor(DefaultHandler):
@@ -172,7 +217,7 @@ class GraphInterpreter(Interpreter):
                     lambda arg: input_asts.append(self.env[arg]),
                 )
                 lowering: InductorLowering = n.meta["lowering"]
-                assert len(input_asts) == len(lowering.input_names)
+                assert len(input_asts) == lowering.num_inputs
                 return lowering.codegen(self.cg, input_asts)
         return super().run_node(n)
 

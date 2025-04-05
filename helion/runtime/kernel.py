@@ -11,6 +11,7 @@ import torch
 from torch._dynamo.source import LocalSource
 from torch._inductor.codecache import PyCodeCache
 
+from .. import exc
 from .._compiler.compile_environment import CompileEnvironment
 from .._compiler.generate_ast import OUTPUT_CODE_HEADER
 from .._compiler.generate_ast import generate_ast
@@ -106,7 +107,7 @@ class BoundKernel:
     def __init__(self, kernel: Kernel, args: tuple[object, ...]) -> None:
         super().__init__()
         self.kernel = kernel
-        self.env = CompileEnvironment(self.kernel.settings)
+        self.env = CompileEnvironment(_extract_device(args), self.kernel.settings)
         with self.env:
             assert len(args) == len(self.kernel.signature.parameters)
             self.fake_args: list[object] = [
@@ -155,6 +156,31 @@ def _tensor_key(obj: torch.Tensor) -> Hashable:
 
 def _sequence_key(obj: Sequence) -> Hashable:
     return type(obj), tuple([_specialization_key(item) for item in obj])
+
+
+def _extract_device(args: tuple[object, ...]) -> torch.device:
+    """
+    Extract the device from the arguments.
+
+    :param args: The arguments to extract the device from.
+    :return: The extracted device
+    """
+    for arg in args:
+        if isinstance(arg, torch.Tensor):
+            return arg.device
+        if isinstance(arg, (tuple, list)):
+            for item in arg:
+                try:
+                    return _extract_device(item)
+                except exc.NoTensorArgs:
+                    pass
+        elif isinstance(arg, dict):
+            for item in arg.values():
+                try:
+                    return _extract_device(item)
+                except exc.NoTensorArgs:
+                    pass
+    raise exc.NoTensorArgs
 
 
 _specialization_extractors: dict[type[object], Callable[[object], Hashable]] = {

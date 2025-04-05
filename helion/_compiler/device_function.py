@@ -9,6 +9,7 @@ from typing import TypeVar
 from typing import cast
 
 import sympy
+import torch
 from torch._inductor.codegen.triton import texpr
 
 from .ast_extension import create
@@ -21,11 +22,10 @@ from .host_function import HostFunction
 from .tile_strategy import FlattenedTileStrategy
 from .tile_strategy import NDTileStrategy
 from .tile_strategy import TileStrategy
+from .variable_origin import BlockSizeOrigin
 from .variable_origin import TensorSizeOrigin
 
 if TYPE_CHECKING:
-    import torch
-
     from ..runtime.config import Config
 
     _P = TypeVar("_P", bound="TensorPropertyArg")
@@ -116,12 +116,6 @@ class DeviceFunction:
         assert self.grid_expr is None, "grid_expr already set"
         self.grid_expr = grid_expr
 
-    def block_index_var(self, dim: int) -> str:
-        return self.tile_strategy.index_var(dim)
-
-    def block_mask_var(self, dim: int | None = None) -> str | None:
-        return self.tile_strategy.mask_var(dim)
-
     def sympy_expr(self, expr: sympy.Expr) -> str:
         symbol_to_origin = HostFunction.current().symbol_to_origin
         expr = CompileEnvironment.current().shape_env.simplify(expr)
@@ -137,11 +131,22 @@ class DeviceFunction:
                     origin.origin.key,
                 )
                 replacements[sym] = sympy.Symbol(arg.name, integer=True)
+            elif isinstance(origin.origin, BlockSizeOrigin):
+                result = self.tile_strategy.block_size_var(origin.origin.block_size_idx)
+                assert result is not None
+                replacements[sym] = sympy.Symbol(result, integer=True)
             else:
                 raise NotImplementedError(
                     "TODO(jansel): handle reading symint directly"
                 )
         return texpr(expr.xreplace(replacements))
+
+    def literal_expr(self, expr: object) -> str:
+        if isinstance(expr, (torch.SymInt, torch.SymFloat, torch.SymBool)):
+            return self.sympy_expr(expr._sympy_())
+        if isinstance(expr, sympy.Expr):
+            return self.sympy_expr(expr)
+        return repr(expr)
 
     def unique_name(self, prefix: str) -> str:
         return self.new_var(f"{prefix}_{next(self._unique_counter[prefix])}")

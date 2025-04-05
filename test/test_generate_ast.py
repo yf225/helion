@@ -45,8 +45,8 @@ from torch._inductor.runtime.triton_helpers import math as tl_math
 def _add_kernel(_x, _y, _out, _x_size_0, _out_stride_0, _x_stride_0, _y_stride_0, _BLOCK_SIZE_0: tl.constexpr):
     _block_idx_0 = (tl.program_id(0) * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0))[:]
     _mask_0 = _block_idx_0 < _x_size_0
-    _v_0 = tl.load(_x + _block_idx_0 * _x_stride_0, _mask_0)
-    _v_1 = tl.load(_y + _block_idx_0 * _y_stride_0, _mask_0)
+    _v_0 = tl.load(_x + _block_idx_0 * _x_stride_0, _mask_0, other=0)
+    _v_1 = tl.load(_y + _block_idx_0 * _y_stride_0, _mask_0, other=0)
     _v_2 = _v_0 + _v_1
     tl.store(_out + _block_idx_0 * _out_stride_0, _v_2, _mask_0)
 
@@ -79,8 +79,8 @@ def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _out_stride_0, _out_stride_1
     _block_idx_1 = _offsets % _x_size_1
     _block_idx_0 = _offsets // _x_size_1
     _mask = _offsets < _x_size_0 * _x_size_1
-    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1), _mask)
-    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1), _mask)
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1), _mask, other=0)
+    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1), _mask, other=0)
     _v_2 = _v_0 + _v_1
     tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1), _v_2, _mask)
 
@@ -115,8 +115,8 @@ def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _out_stride_0, _out_stride_1
     _block_idx_0 = _offsets % _x_size_0
     _block_idx_1 = _offsets // _x_size_0
     _mask = _offsets < _x_size_0 * _x_size_1
-    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1), _mask)
-    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1), _mask)
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1), _mask, other=0)
+    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1), _mask, other=0)
     _v_2 = _v_0 + _v_1
     tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1), _v_2, _mask)
 
@@ -150,8 +150,8 @@ def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _x_size_2, _out_stride_0, _o
     _block_idx_1 = _offsets // _x_size_2 % _x_size_1
     _block_idx_0 = _offsets // (_x_size_1 * _x_size_2)
     _mask = _offsets < _x_size_0 * _x_size_1 * _x_size_2
-    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask)
-    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask)
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask, other=0)
+    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask, other=0)
     _v_2 = _v_0 + _v_1
     tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1 + _block_idx_2 * _out_stride_2), _v_2, _mask)
 
@@ -187,8 +187,8 @@ def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _x_size_2, _out_stride_0, _o
     _block_idx_0 = _offsets // _x_size_1 % _x_size_0
     _block_idx_2 = _offsets // (_x_size_0 * _x_size_1)
     _mask = _offsets < _x_size_0 * _x_size_1 * _x_size_2
-    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask)
-    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask)
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask, other=0)
+    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask, other=0)
     _v_2 = _v_0 + _v_1
     tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1 + _block_idx_2 * _out_stride_2), _v_2, _mask)
 
@@ -225,8 +225,8 @@ def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _x_size_2, _out_stride_0, _o
     _mask_1 = _block_idx_1 < _x_size_1
     _block_idx_2 = (tl.program_id(2) * _BLOCK_SIZE_2 + tl.arange(0, _BLOCK_SIZE_2))[None, None, :]
     _mask_2 = _block_idx_2 < _x_size_2
-    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask_0 | _mask_1 | _mask_2)
-    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask_0 | _mask_1 | _mask_2)
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask_0 | _mask_1 | _mask_2, other=0)
+    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask_0 | _mask_1 | _mask_2, other=0)
     _v_2 = _v_0 + _v_1
     tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1 + _block_idx_2 * _out_stride_2), _v_2, _mask_0 | _mask_1 | _mask_2)
 
@@ -258,25 +258,25 @@ from triton import language as tl
 from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
-def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _x_size_2, _out_stride_0, _out_stride_1, _out_stride_2, _x_stride_0, _x_stride_1, _x_stride_2, _y_stride_0, _y_stride_1, _y_stride_2, _BLOCK_SIZE_0: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr):
-    _block_idx_2 = (tl.program_id(0) * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0))[:, None, None]
-    _mask_0 = _block_idx_2 < _x_size_2
+def _add_kernel(_x, _y, _out, _x_size_0, _x_size_1, _x_size_2, _out_stride_0, _out_stride_1, _out_stride_2, _x_stride_0, _x_stride_1, _x_stride_2, _y_stride_0, _y_stride_1, _y_stride_2, _BLOCK_SIZE_2: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr, _BLOCK_SIZE_0: tl.constexpr):
+    _block_idx_2 = (tl.program_id(0) * _BLOCK_SIZE_2 + tl.arange(0, _BLOCK_SIZE_2))[:, None, None]
+    _mask_2 = _block_idx_2 < _x_size_2
     _block_idx_1 = (tl.program_id(1) * _BLOCK_SIZE_1 + tl.arange(0, _BLOCK_SIZE_1))[None, :, None]
     _mask_1 = _block_idx_1 < _x_size_1
-    _block_idx_0 = (tl.program_id(2) * _BLOCK_SIZE_2 + tl.arange(0, _BLOCK_SIZE_2))[None, None, :]
-    _mask_2 = _block_idx_0 < _x_size_0
-    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask_0 | _mask_1 | _mask_2)
-    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask_0 | _mask_1 | _mask_2)
+    _block_idx_0 = (tl.program_id(2) * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0))[None, None, :]
+    _mask_0 = _block_idx_0 < _x_size_0
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask_0 | _mask_1 | _mask_2, other=0)
+    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask_0 | _mask_1 | _mask_2, other=0)
     _v_2 = _v_0 + _v_1
     tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1 + _block_idx_2 * _out_stride_2), _v_2, _mask_0 | _mask_1 | _mask_2)
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
     out = torch.empty_like(x)
-    _BLOCK_SIZE_0 = 32
+    _BLOCK_SIZE_2 = 32
     _BLOCK_SIZE_1 = 16
-    _BLOCK_SIZE_2 = 8
-    _add_kernel[triton.cdiv(x.size(2), _BLOCK_SIZE_0), triton.cdiv(x.size(1), _BLOCK_SIZE_1), triton.cdiv(x.size(0), _BLOCK_SIZE_2)](x, y, out, x.size(0), x.size(1), x.size(2), out.stride(0), out.stride(1), out.stride(2), x.stride(0), x.stride(1), x.stride(2), y.stride(0), y.stride(1), y.stride(2), _BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2, num_warps=4, num_stages=3)
+    _BLOCK_SIZE_0 = 8
+    _add_kernel[triton.cdiv(x.size(2), _BLOCK_SIZE_2), triton.cdiv(x.size(1), _BLOCK_SIZE_1), triton.cdiv(x.size(0), _BLOCK_SIZE_0)](x, y, out, x.size(0), x.size(1), x.size(2), out.stride(0), out.stride(1), out.stride(2), x.stride(0), x.stride(1), x.stride(2), y.stride(0), y.stride(1), y.stride(2), _BLOCK_SIZE_2, _BLOCK_SIZE_1, _BLOCK_SIZE_0, num_warps=4, num_stages=3)
     return out""",
         )
 
@@ -301,13 +301,13 @@ from torch._inductor.runtime.triton_helpers import math as tl_math
 def _add_kernel(_x, _y, _out, _x_size_1, _x_size_2, _out_stride_0, _out_stride_1, _out_stride_2, _x_stride_0, _x_stride_1, _x_stride_2, _y_stride_0, _y_stride_1, _y_stride_2, _BLOCK_SIZE_1: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr):
     _block_idx_0 = tl.program_id(0)
     _block_idx_1 = (tl.program_id(1) * _BLOCK_SIZE_1 + tl.arange(0, _BLOCK_SIZE_1))[:, None]
-    _mask_0 = _block_idx_1 < _x_size_1
+    _mask_1 = _block_idx_1 < _x_size_1
     _block_idx_2 = (tl.program_id(2) * _BLOCK_SIZE_2 + tl.arange(0, _BLOCK_SIZE_2))[None, :]
-    _mask_1 = _block_idx_2 < _x_size_2
-    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask_0 | _mask_1)
-    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask_0 | _mask_1)
+    _mask_2 = _block_idx_2 < _x_size_2
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask_1 | _mask_2, other=0)
+    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask_1 | _mask_2, other=0)
     _v_2 = _v_0 + _v_1
-    tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1 + _block_idx_2 * _out_stride_2), _v_2, _mask_0 | _mask_1)
+    tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1 + _block_idx_2 * _out_stride_2), _v_2, _mask_1 | _mask_2)
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
@@ -341,21 +341,21 @@ from triton import language as tl
 from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
-def _add_kernel(_x, _y, _out, _x_size_1, _out_stride_0, _out_stride_1, _out_stride_2, _x_stride_0, _x_stride_1, _x_stride_2, _y_stride_0, _y_stride_1, _y_stride_2, _BLOCK_SIZE_2: tl.constexpr):
+def _add_kernel(_x, _y, _out, _x_size_1, _out_stride_0, _out_stride_1, _out_stride_2, _x_stride_0, _x_stride_1, _x_stride_2, _y_stride_0, _y_stride_1, _y_stride_2, _BLOCK_SIZE_1: tl.constexpr):
     _block_idx_0 = tl.program_id(0)
     _block_idx_2 = tl.program_id(1)
-    _block_idx_1 = (tl.program_id(2) * _BLOCK_SIZE_2 + tl.arange(0, _BLOCK_SIZE_2))[:]
-    _mask_0 = _block_idx_1 < _x_size_1
-    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask_0)
-    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask_0)
+    _block_idx_1 = (tl.program_id(2) * _BLOCK_SIZE_1 + tl.arange(0, _BLOCK_SIZE_1))[:]
+    _mask_1 = _block_idx_1 < _x_size_1
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1 + _block_idx_2 * _x_stride_2), _mask_1, other=0)
+    _v_1 = tl.load(_y + (_block_idx_0 * _y_stride_0 + _block_idx_1 * _y_stride_1 + _block_idx_2 * _y_stride_2), _mask_1, other=0)
     _v_2 = _v_0 + _v_1
-    tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1 + _block_idx_2 * _out_stride_2), _v_2, _mask_0)
+    tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1 + _block_idx_2 * _out_stride_2), _v_2, _mask_1)
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
     out = torch.empty_like(x)
-    _BLOCK_SIZE_2 = 32
-    _add_kernel[x.size(0), x.size(2), triton.cdiv(x.size(1), _BLOCK_SIZE_2)](x, y, out, x.size(1), out.stride(0), out.stride(1), out.stride(2), x.stride(0), x.stride(1), x.stride(2), y.stride(0), y.stride(1), y.stride(2), _BLOCK_SIZE_2, num_warps=8, num_stages=1)
+    _BLOCK_SIZE_1 = 32
+    _add_kernel[x.size(0), x.size(2), triton.cdiv(x.size(1), _BLOCK_SIZE_1)](x, y, out, x.size(1), out.stride(0), out.stride(1), out.stride(2), x.stride(0), x.stride(1), x.stride(2), y.stride(0), y.stride(1), y.stride(2), _BLOCK_SIZE_1, num_warps=8, num_stages=1)
     return out""",
         )
 
@@ -384,9 +384,9 @@ from torch._inductor.runtime.triton_helpers import math as tl_math
 def _torch_ops_pointwise_kernel(_x, _y, _out, _x_size_0, _out_stride_0, _x_stride_0, _y_stride_0, _BLOCK_SIZE_0: tl.constexpr):
     _block_idx_0 = (tl.program_id(0) * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0))[:]
     _mask_0 = _block_idx_0 < _x_size_0
-    _v_0 = tl.load(_x + _block_idx_0 * _x_stride_0, _mask_0)
+    _v_0 = tl.load(_x + _block_idx_0 * _x_stride_0, _mask_0, other=0)
     _v_1 = tl_math.sin(_v_0)
-    _v_2 = tl.load(_y + _block_idx_0 * _y_stride_0, _mask_0)
+    _v_2 = tl.load(_y + _block_idx_0 * _y_stride_0, _mask_0, other=0)
     _v_3 = tl_math.cos(_v_2)
     _v_4 = _v_1 + _v_3
     _v_5 = tl.sigmoid(_v_4)
@@ -396,6 +396,113 @@ def torch_ops_pointwise(x, y):
     out = torch.empty_like(x)
     _BLOCK_SIZE_0 = 128
     _torch_ops_pointwise_kernel[triton.cdiv(x.size(0), _BLOCK_SIZE_0),](x, y, out, x.size(0), out.stride(0), x.stride(0), y.stride(0), _BLOCK_SIZE_0, num_warps=4, num_stages=3)
+    return out""",
+        )
+
+    def test_hl_zeros_usage(self):
+        args = (torch.randn([512, 512], device="cuda"),)
+        code, result = code_and_output(
+            basic_kernels.hl_zeros_usage,
+            args,
+            block_size=[32, 32],
+        )
+        torch.testing.assert_close(result, args[0] * 2)
+        self.assertExpectedInline(
+            code,
+            """\
+import torch
+import triton
+from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
+
+@triton.jit
+def _hl_zeros_usage_kernel(_x, _out, _x_size_0, _x_size_1, _out_stride_0, _out_stride_1, _x_stride_0, _x_stride_1, _BLOCK_SIZE_0: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr):
+    _block_idx_0 = (tl.program_id(0) * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0))[:, None]
+    _mask_0 = _block_idx_0 < _x_size_0
+    _block_idx_1 = (tl.program_id(1) * _BLOCK_SIZE_1 + tl.arange(0, _BLOCK_SIZE_1))[None, :]
+    _mask_1 = _block_idx_1 < _x_size_1
+    tmp = tl.full([_BLOCK_SIZE_0, _BLOCK_SIZE_1], 0.0, tl.float32)
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1), _mask_0 | _mask_1, other=0)
+    tmp += _v_0
+    _v_1 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1), _mask_0 | _mask_1, other=0)
+    tmp += _v_1
+    tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1), tmp, _mask_0 | _mask_1)
+
+def hl_zeros_usage(x: torch.Tensor):
+    out = torch.empty_like(x)
+    _BLOCK_SIZE_0 = 32
+    _BLOCK_SIZE_1 = 32
+    _hl_zeros_usage_kernel[triton.cdiv(x.size(0), _BLOCK_SIZE_0), triton.cdiv(x.size(1), _BLOCK_SIZE_1)](x, out, x.size(0), x.size(1), out.stride(0), out.stride(1), x.stride(0), x.stride(1), _BLOCK_SIZE_0, _BLOCK_SIZE_1, num_warps=4, num_stages=3)
+    return out""",
+        )
+
+    def test_hl_full_usage(self):
+        args = (torch.randn([512], device="cuda"),)
+        code, result = code_and_output(
+            basic_kernels.hl_full_usage,
+            args,
+            block_size=128,
+        )
+        torch.testing.assert_close(result, args[0] * 2 + 1)
+        self.assertExpectedInline(
+            code,
+            """\
+import torch
+import triton
+from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
+
+@triton.jit
+def _hl_full_usage_kernel(_x, _out, _x_size_0, _out_stride_0, _x_stride_0, _BLOCK_SIZE_0: tl.constexpr):
+    _block_idx_0 = (tl.program_id(0) * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0))[:]
+    _mask_0 = _block_idx_0 < _x_size_0
+    tmp = tl.full([_BLOCK_SIZE_0], 1, tl.float32)
+    _v_0 = tl.load(_x + _block_idx_0 * _x_stride_0, _mask_0, other=0)
+    tmp += _v_0
+    _v_1 = tl.load(_x + _block_idx_0 * _x_stride_0, _mask_0, other=0)
+    tmp += _v_1
+    tl.store(_out + _block_idx_0 * _out_stride_0, tmp, _mask_0)
+
+def hl_full_usage(x: torch.Tensor):
+    out = torch.empty_like(x)
+    _BLOCK_SIZE_0 = 128
+    _hl_full_usage_kernel[triton.cdiv(x.size(0), _BLOCK_SIZE_0),](x, out, x.size(0), out.stride(0), x.stride(0), _BLOCK_SIZE_0, num_warps=4, num_stages=3)
+    return out""",
+        )
+
+    def test_hl_zeros_flat(self):
+        args = (torch.randn([512, 512], device="cuda"),)
+        code, result = code_and_output(
+            basic_kernels.hl_zeros_usage,
+            args,
+            block_size=128,
+        )
+        torch.testing.assert_close(result, args[0] * 2)
+        self.assertExpectedInline(
+            code,
+            """\
+import torch
+import triton
+from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
+
+@triton.jit
+def _hl_zeros_usage_kernel(_x, _out, _x_size_0, _x_size_1, _out_stride_0, _out_stride_1, _x_stride_0, _x_stride_1, _BLOCK_SIZE: tl.constexpr):
+    _offsets = tl.program_id(0) * _BLOCK_SIZE + tl.arange(0, _BLOCK_SIZE)
+    _block_idx_1 = _offsets % _x_size_1
+    _block_idx_0 = _offsets // _x_size_1
+    _mask = _offsets < _x_size_0 * _x_size_1
+    tmp = tl.full([_BLOCK_SIZE], 0.0, tl.float32)
+    _v_0 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1), _mask, other=0)
+    tmp += _v_0
+    _v_1 = tl.load(_x + (_block_idx_0 * _x_stride_0 + _block_idx_1 * _x_stride_1), _mask, other=0)
+    tmp += _v_1
+    tl.store(_out + (_block_idx_0 * _out_stride_0 + _block_idx_1 * _out_stride_1), tmp, _mask)
+
+def hl_zeros_usage(x: torch.Tensor):
+    out = torch.empty_like(x)
+    _BLOCK_SIZE = 128
+    _hl_zeros_usage_kernel[triton.cdiv(x.size(0) * x.size(1), _BLOCK_SIZE), 1, 1](x, out, x.size(0), x.size(1), out.stride(0), out.stride(1), x.stride(0), x.stride(1), _BLOCK_SIZE, num_warps=4, num_stages=3)
     return out""",
         )
 

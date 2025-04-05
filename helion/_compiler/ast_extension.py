@@ -13,6 +13,8 @@ from .source_location import current_location
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    import torch
+
     from .type_propagation import TypeInfo
 
     _T = TypeVar("_T", bound=ast.AST)
@@ -53,6 +55,7 @@ class ExtendedAST:
         self._type_info: TypeInfo | None = _type_info
         self._location: SourceLocation = _location
         self._loop_type: LoopType = _loop_type
+        self._graph: torch.fx.GraphModule | None = None
 
     def new(self, fields: dict[str, object]) -> ExtendedAST:
         result = self.__class__(
@@ -62,6 +65,12 @@ class ExtendedAST:
             _loop_type=self._loop_type,
         )
         return self._location.to_ast(result)
+
+    def fields(self) -> dict[str, object]:
+        return {field: getattr(self, field) for field in self._fields}
+
+    def copy(self, **changes: object) -> ExtendedAST:
+        return self.new({**self.fields(), **changes})
 
     def __repr__(self) -> str:
         assert isinstance(self, ast.AST)

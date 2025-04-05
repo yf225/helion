@@ -6,24 +6,29 @@ import contextlib
 import dataclasses
 import functools
 import inspect
+import itertools
 import types
 from typing import TYPE_CHECKING
 from typing import Callable
 from typing import NoReturn
 from typing import Protocol
 from typing import TypeVar
+from unittest.mock import patch
 
 import sympy
 import torch
+from torch._dynamo.convert_frame import compile_lock
 from torch._inductor.decomposition import select_decomp_table
-from torch.fx.experimental.proxy_tensor import make_fx
+from torch.fx.experimental import proxy_tensor
 
 from .. import exc
 from ..autotuner.config_spec import BlockSizeSpec
 from ..autotuner.config_spec import PermutationSpec
 from ..language._decorators import is_api_func
+from ..language.creation_ops import _symnode_dummy_origin
 from .ast_extension import ExtendedAST
 from .ast_extension import LoopType
+from .ast_extension import create
 from .compile_environment import CompileEnvironment
 from .compile_environment import warning
 from .host_function import HostFunction
@@ -31,6 +36,7 @@ from .host_function import SymbolOrigin
 from .inductor_lowering import process_graph_in_type_propagation
 from .source_location import SourceLocation
 from .source_location import current_location
+from .tile_index_proxy import TileIndexProxy
 from .variable_origin import ArgumentOrigin
 from .variable_origin import AttributeOrigin
 from .variable_origin import BuiltinOrigin
@@ -47,8 +53,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from collections.abc import Sequence
     from typing_extensions import Self
-
-    from torch.fx import GraphModule
 
     class _VisitMethod(Protocol):
         @staticmethod
@@ -305,6 +309,23 @@ class TypeInfo:
     def populate_symbol_origins(self, origin: Origin) -> None:
         pass
 
+    def tree_map(self, fn: Callable[[TypeInfo], object]) -> object:
+        """Apply fn to all non-Collection TypeInfos in the tree"""
+        return fn(self)
+
+    def contains_type(self, cls: type[TypeInfo] | tuple[type[TypeInfo], ...]) -> bool:
+        def visit(n: TypeInfo) -> None:
+            if isinstance(n, cls):
+                nonlocal found
+                found = True
+
+        found = False
+        self.tree_map(visit)
+        return found
+
+    def contains_tensor(self) -> bool:
+        return self.contains_type(TensorType)
+
 
 class TensorType(TypeInfo):
     fake_value: torch.Tensor
@@ -312,6 +333,8 @@ class TensorType(TypeInfo):
     def __init__(self, origin: Origin, fake_value: torch.Tensor) -> None:
         super().__init__(origin)
         self.fake_value = fake_value
+        if origin.is_device():
+            CompileEnvironment.current().add_kernel_tensor_size(fake_value.size())
 
     def __str__(self) -> str:
         shape = []
@@ -571,12 +594,10 @@ class LiteralType(TypeInfo):
 
 class CallableType(LiteralType):
     value: Callable[..., object]
-    graph: GraphModule | None = None
 
     def __init__(self, origin: Origin, value: Callable[..., object]) -> None:
         super().__init__(origin, value)
         self.value = value
-        self.graph = None
 
     def __str__(self) -> str:
         try:
@@ -590,8 +611,9 @@ class CallableType(LiteralType):
 
     def debug_annotations(self) -> list[str]:
         result = [*super().debug_annotations()]
-        if self.graph:
-            result.extend(str(self.graph.graph).splitlines())
+        stack = ExtendedAST.current()
+        if stack and (gm := stack[-1]._graph):
+            result.extend(str(gm.graph).splitlines())
         return result
 
     def propagate_call(
@@ -600,88 +622,114 @@ class CallableType(LiteralType):
         if is_api_func(fn := self.value):
             if fn._is_device_only and origin.is_host():
                 raise exc.DeviceAPIOnHost(fn.__qualname__)
-            assert fn._type_function is not None
-            return fn._type_function(*args, **kwargs, origin=origin)
+            if fn._type_function is not None:
+                return fn._type_function(*args, **kwargs, origin=origin)
+            # fall through to tracing
+        # TODO(jansel): add no-tracing mode
 
-        # TODO(jansel): support no-tracing mode
+        def extract_tensor_inputs(arg: TypeInfo) -> None:
+            if isinstance(arg, TensorType):
+                nonlocal tensor_proxies
+                tensor_proxies.append(arg.proxy())
 
-        tensor_inputs = False
-        proxy_args = []
-        proxy_kwargs = {}
-        for i, arg in enumerate(args):
-            tensor_inputs = tensor_inputs or isinstance(arg, TensorType)
-            try:
-                proxy_args.append(arg.proxy())
-            except NotImplementedError:
-                return UnknownType(
-                    origin,
-                    f"Argument {i} ({arg!s}) cannot be converted to proxy",
-                    chained_from=arg,
-                )
-        for key, arg in kwargs.items():
-            tensor_inputs = tensor_inputs or isinstance(arg, TensorType)
-            try:
-                proxy_kwargs[key] = arg.proxy()
-            except NotImplementedError:
-                return UnknownType(
-                    origin,
-                    f"Argument {key} ({arg!s}) cannot be converted to proxy",
-                    chained_from=arg,
-                )
+        def warn_wrong_device(arg: TypeInfo) -> None:
+            if isinstance(arg, TensorType):
+                if arg.fake_value.device != env.device:
+                    warning(
+                        exc.WrongDevice(self.value, arg.fake_value.device, env.device)
+                    )
 
+        env: CompileEnvironment = CompileEnvironment.current()
+        tensor_proxies: list[torch.Tensor] = []
+        for x in itertools.chain(args, kwargs.values()):
+            x.tree_map(extract_tensor_inputs)
+        traced_fn = self._embed_literal_args_for_tracing(args, kwargs)
         try:
             output_type = TypeInfo.from_example(
-                self.value(
-                    *proxy_args,
-                    **proxy_kwargs,
-                ),
+                traced_fn(*tensor_proxies),
                 origin,
             )
+            output_type.tree_map(warn_wrong_device)
             if isinstance(output_type, UnknownType) or (
                 origin.is_host()
                 and not isinstance(output_type, TensorType)
-                and not tensor_inputs
+                and not tensor_proxies
             ):
+                # don't make_fx non-tensor ops
                 return output_type
 
-            if proxy_kwargs:
-                signature = inspect.signature(self.value)
-                assert not any(
-                    param.kind == inspect.Parameter.KEYWORD_ONLY
-                    for param in signature.parameters.values()
-                )
-                bound = signature.bind(*proxy_args, **proxy_kwargs)
-                bound.apply_defaults()
-                proxy_args = [*bound.arguments.values()]
-                del proxy_kwargs
-
-            # TODO(jansel): lift closures
-            self.graph = graph = make_fx(
-                self.value, decomposition_table=select_decomp_table()
-            )(*proxy_args)
+            graph = self._make_fx(
+                traced_fn,
+                *tensor_proxies,
+            )
+            node = ExtendedAST.current()[-1]
+            assert isinstance(node, ast.Call)
+            node._graph = graph
             if origin.is_host():
-                self._warn_graph_contains_disallowed_host_ops()
+                _warn_graph_contains_disallowed_host_ops(graph)
             else:
                 process_graph_in_type_propagation(graph)
             return output_type
+        except exc.Base:
+            raise
         except Exception as e:
             # TODO(jansel): point to other tracing modes
             raise exc.TorchOpTracingError(e) from e
 
-    def _warn_graph_contains_disallowed_host_ops(self) -> None:
-        graph = self.graph
-        assert graph is not None
-        for node in graph.graph.nodes:
-            if node.op == "call_function":
-                opname = getattr(node.target, "_opname", "")
-                if opname not in {
-                    "",
-                    "sym_size",
-                    "empty",
-                    "full",
-                    "permute",
-                }:
-                    warning(exc.TensorOperationsInHostCall(opname))
+    def _make_fx(
+        self, fn: Callable[..., object], *args: object
+    ) -> torch.fx.GraphModule:
+        """
+        We monkey patch get_proxy_slot to support SymInt/SymFloat/SymBool
+        in the graph without any origin for them.  We instead insert
+        symnode_dummy_origin() in the graph which are ignored in codegen.
+        """
+
+        def _get_proxy_slot(
+            obj: object,
+            tracer: proxy_tensor.PythonKeyTracer,
+            default: object = proxy_tensor.no_default,
+            transform: Callable[[object], object] = lambda x: x,
+        ) -> object:
+            if isinstance(obj, proxy_tensor.py_sym_types):
+                tracker = tracer.symnode_tracker
+                if obj not in tracker:
+                    tracker[obj] = proxy = tracer.create_proxy(
+                        "call_function", _symnode_dummy_origin, (), {}
+                    )
+                    proxy.node.meta["val"] = obj
+                    proxy.force = lambda: proxy
+                return tracker[obj]
+            return get_proxy_slot(obj, tracer, default, transform)
+
+        get_proxy_slot: Callable[..., object] = proxy_tensor.get_proxy_slot
+        with (
+            compile_lock,
+            patch.object(proxy_tensor, "get_proxy_slot", _get_proxy_slot),
+        ):
+            return proxy_tensor.make_fx(fn, decomposition_table=select_decomp_table())(
+                *args
+            )
+
+    def _embed_literal_args_for_tracing(
+        self, args: tuple[TypeInfo, ...], kwargs: dict[str, TypeInfo]
+    ) -> Callable[..., object]:
+        # TODO(jansel): lift closures
+        def wrapped(*tensor_args: torch.Tensor) -> object:
+            def process_arg(arg: TypeInfo) -> object:
+                if isinstance(arg, TensorType):
+                    nonlocal idx
+                    idx += 1
+                    return tensor_args[idx - 1]
+                return arg.proxy()
+
+            idx = 0
+            new_args = [x.tree_map(process_arg) for x in args]
+            new_kwargs = {k: v.tree_map(process_arg) for k, v in kwargs.items()}
+            assert idx == len(tensor_args)
+            return self.value(*new_args, **new_kwargs)
+
+        return wrapped
 
 
 class PythonModuleType(LiteralType):
@@ -851,6 +899,9 @@ class TileIndexType(TypeInfo):
         super().__init__(origin)
         self.block_size_idx = block_size_idx
 
+    def proxy(self) -> object:
+        return TileIndexProxy(self.block_size_idx)
+
     @staticmethod
     def allocate(
         numels: list[int | torch.SymInt], origin: Origin
@@ -953,7 +1004,7 @@ class CollectionType(TypeInfo):
                 result = self.element_types[literal_key]
             except (KeyError, IndexError) as e:
                 return UnknownType(origin, f"{type(e).__name__}: {e}")
-            if isinstance(result, LiteralType):
+            if isinstance(result, TypeInfo):
                 return result
             if type(result) is self.python_type:  # sliced!
                 # pyre-ignore[6]
@@ -991,6 +1042,9 @@ class CollectionType(TypeInfo):
     def truth_value(self) -> bool:
         return bool(self.element_types)
 
+    def tree_map(self, fn: Callable[[TypeInfo], object]) -> object:
+        raise NotImplementedError
+
 
 class SequenceType(CollectionType):
     element_types: list[TypeInfo] | tuple[TypeInfo, ...]
@@ -1020,6 +1074,11 @@ class SequenceType(CollectionType):
         for i, subtype in enumerate(self.element_types):
             subtype.populate_symbol_origins(GetItemOrigin(origin, i))
 
+    def tree_map(
+        self, fn: Callable[[TypeInfo], object]
+    ) -> list[object] | tuple[object, ...]:
+        return self._maybe_tuple([x.tree_map(fn) for x in self.element_types])
+
 
 class DictType(CollectionType):
     element_types: dict[str | int, TypeInfo]
@@ -1040,6 +1099,9 @@ class DictType(CollectionType):
     def populate_symbol_origins(self, origin: Origin) -> None:
         for k, subtype in self.element_types.items():
             subtype.populate_symbol_origins(GetItemOrigin(origin, k))
+
+    def tree_map(self, fn: Callable[[TypeInfo], object]) -> dict[str | int, object]:
+        return {k: v.tree_map(fn) for k, v in self.element_types.items()}
 
 
 class SliceType(CollectionType):
@@ -1070,6 +1132,11 @@ class SliceType(CollectionType):
 
     def unpack(self) -> list[TypeInfo]:
         return [self.lower, self.upper, self.step]
+
+    def tree_map(self, fn: Callable[[TypeInfo], object]) -> slice:
+        return slice(
+            self.lower.tree_map(fn), self.upper.tree_map(fn), self.step.tree_map(fn)
+        )
 
 
 class TypeNotAllowedOnDevice(TypeInfo):
@@ -1688,7 +1755,19 @@ class TypePropagation(ast.NodeVisitor):
             self._assign(node.target, type_info)
         return NoType(origin=self.origin())
 
-    visit_AugAssign: _VisitMethod = generic_statement
+    def visit_AugAssign(self, node: ast.AugAssign) -> TypeInfo:
+        assert isinstance(node.target, ExtendedAST)
+        type_info = self.visit(
+            create(
+                ast.BinOp,
+                left=node.target.copy(ctx=ast.Load()),
+                op=node.op,
+                right=node.value,
+            )
+        )
+        self._assign(node.target, type_info)
+        return NoType(origin=self.origin())
+
     visit_Raise: _VisitMethod = generic_statement
     visit_Assert: _VisitMethod = generic_statement
     visit_Delete: _VisitMethod = generic_statement
@@ -1866,3 +1945,17 @@ def propagate_types(func: HostFunction, fake_args: list[object]) -> None:
         prop = TypePropagation(func, local_scope)
         for stmt in func.body:
             prop.visit(stmt)
+
+
+def _warn_graph_contains_disallowed_host_ops(graph: torch.fx.GraphModule) -> None:
+    for node in graph.graph.nodes:
+        if node.op == "call_function":
+            opname = getattr(node.target, "_opname", "")
+            if opname not in {
+                "",
+                "sym_size",
+                "empty",
+                "full",
+                "permute",
+            }:
+                warning(exc.TensorOperationsInHostCall(opname))

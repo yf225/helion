@@ -143,3 +143,8 @@ class SourceOrigin(HostOrigin):
 @dataclasses.dataclass
 class DeviceOrigin(Origin):
     location: SourceLocation
+
+
+@dataclasses.dataclass
+class BlockSizeOrigin(Origin):
+    block_size_idx: int

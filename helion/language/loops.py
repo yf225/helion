@@ -106,7 +106,7 @@ def _tile_codegen(state: CodegenState) -> ast.AST:
     loop_type = for_loop._loop_type
     type_info = state.type_info
     assert isinstance(for_loop, ast.For)
-    assert for_loop.iter is state.node
+    assert for_loop.iter is state.ast_node
     assert isinstance(type_info, IterType)
     if isinstance(type_info.inner, SequenceType):
         tile_indices = type_info.inner.unpack()
@@ -118,7 +118,7 @@ def _tile_codegen(state: CodegenState) -> ast.AST:
         state.tile_strategy.codegen_grid(
             state, [t.block_size_idx for t in tile_indices]
         )
-        return state.node
+        return state.ast_node
     if loop_type == LoopType.DEVICE:
         raise NotImplementedError("TODO: implement tile() for device loops")
     raise AssertionError(f"Expected loop type: {loop_type}")
