@@ -9,6 +9,7 @@ from typing import Protocol
 import sympy
 import torch
 from torch._dynamo.source import LocalSource
+from torch._inductor.utils import triton_type
 from torch._subclasses import FakeTensor
 from torch._subclasses import FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
@@ -104,6 +105,15 @@ class CompileEnvironment:
     def to_fake(self, obj: object, source: Source) -> object:
         if isinstance(obj, torch.Tensor):
             return self._to_fake_tensor(obj, source)
+        if isinstance(obj, int):
+            with self.shape_env.ignore_fresh_unbacked_symbols():
+                return self.shape_env.create_unbacked_symint()
+        if isinstance(obj, float):
+            with self.shape_env.ignore_fresh_unbacked_symbols():
+                return self.shape_env.create_unbacked_symfloat()
+        if isinstance(obj, bool):
+            with self.shape_env.ignore_fresh_unbacked_symbols():
+                return self.shape_env.create_unbacked_symbool()
         # TODO(jansel): support other types of args
         raise TypeError(f"unsupported argument type {type(obj)} ({source})")
 
@@ -130,6 +140,10 @@ class CompileEnvironment:
             return int(self.shape_env.size_hint(n._sympy_()))
         assert isinstance(n, int)
         return n
+
+    def triton_index_type(self) -> str:
+        """tl.int32 or tl.int64 depending on Settings()"""
+        return triton_type(self.settings.index_dtype)
 
     def __enter__(self) -> Self:
         assert getattr(tls, "env", None) is None, "CompileEnvironment already active"

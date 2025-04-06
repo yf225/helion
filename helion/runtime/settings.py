@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 from typing import Protocol
 from typing import cast
 
+import torch
+
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
@@ -47,6 +49,7 @@ class _Settings:
     ignore_warnings: list[type[exc.BaseWarning]] = dataclasses.field(
         default_factory=list
     )
+    index_dtype: torch.dtype = torch.int32
 
 
 class Settings(_Settings):
@@ -57,8 +60,9 @@ class Settings(_Settings):
     """
 
     __slots__: dict[str, str] = {
-        "configs": "Optional list of Config objects to search in autotuning",
-        "ignore_warnings": "Subtypes of exc.BaseWarning to ignore when compiling",
+        "configs": "Optional list of Config objects to search in autotuning.",
+        "ignore_warnings": "Subtypes of exc.BaseWarning to ignore when compiling.",
+        "index_dtype": "The dtype to use for index variables. Default is torch.int32.",
     }
     assert __slots__.keys() == {field.name for field in dataclasses.fields(_Settings)}
 

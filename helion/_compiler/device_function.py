@@ -23,6 +23,7 @@ from .tile_strategy import FlattenedTileStrategy
 from .tile_strategy import NDTileStrategy
 from .tile_strategy import TileStrategy
 from .variable_origin import BlockSizeOrigin
+from .variable_origin import Origin
 from .variable_origin import TensorSizeOrigin
 
 if TYPE_CHECKING:
@@ -74,21 +75,29 @@ class TensorStrideArg(TensorPropertyArg):
 
 
 @dataclasses.dataclass
-class ConstExprArg(Argument):
+class NumericArgument(Argument):
     _host_str: str
 
     def host_str(self) -> str:
         return self._host_str
 
+
+class ConstExprArg(NumericArgument):
     def arg_def_node(self) -> ast.arg:
         return create_arg(self.name, "tl.constexpr")
+
+
+@dataclasses.dataclass
+class SymbolArgument(NumericArgument):
+    pass
 
 
 _sort_order: dict[type[Argument], int] = {
     TensorArg: 0,
     TensorSizeArg: 1,
     TensorStrideArg: 2,
-    ConstExprArg: 3,
+    SymbolArgument: 3,
+    ConstExprArg: 4,
 }
 
 
@@ -100,6 +109,7 @@ class DeviceFunction:
         self.arguments: list[Argument] = []
         self.body: list[ast.AST] = []
         self._tensor_args: dict[torch.Tensor, TensorArg] = {}
+        self._symbol_args: dict[str, SymbolArgument] = {}
         self._tensor_properties: dict[
             tuple[type[TensorPropertyArg], torch.Tensor, int], TensorPropertyArg
         ] = {}
@@ -136,8 +146,8 @@ class DeviceFunction:
                 assert result is not None
                 replacements[sym] = sympy.Symbol(result, integer=True)
             else:
-                raise NotImplementedError(
-                    "TODO(jansel): handle reading symint directly"
+                replacements[sym] = sympy.Symbol(
+                    self.symbol_arg(sym, origin.origin).name, integer=True
                 )
         return texpr(expr.xreplace(replacements))
 
@@ -168,6 +178,16 @@ class DeviceFunction:
             self.arguments.append(arg)
             self._tensor_args[fake_value] = arg
         return self._tensor_args[fake_value]
+
+    def symbol_arg(self, sym: sympy.Symbol, origin: Origin) -> SymbolArgument:
+        if sym.name not in self._symbol_args:
+            arg = SymbolArgument(
+                name=self.new_var(origin.suggest_var_name()),
+                _host_str=origin.host_str(),
+            )
+            self.arguments.append(arg)
+            self._symbol_args[sym.name] = arg
+        return self._symbol_args[sym.name]
 
     def constexpr_arg(self, name: str, host_str: str | None = None) -> ConstExprArg:
         self.arguments.append(rv := ConstExprArg(name, host_str or name))

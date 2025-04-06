@@ -306,6 +306,13 @@ class TypeInfo:
     def as_literal(self) -> object:
         raise NotImplementedError
 
+    def is_literal(self) -> bool:
+        try:
+            self.as_literal()
+        except NotImplementedError:
+            return False
+        return True
+
     def populate_symbol_origins(self, origin: Origin) -> None:
         pass
 
@@ -387,6 +394,8 @@ class TensorType(TypeInfo):
                     output_sizes.append(1)
                 else:
                     raise exc.InvalidIndexingType(k)
+            elif isinstance(k, SymIntType):
+                inputs_consumed += 1
             elif isinstance(k, SliceType):
                 length = self.fake_value.size(inputs_consumed)
                 start = k.lower.proxy()
@@ -751,6 +760,9 @@ class NumericType(TypeInfo):
     ) -> None:
         super().__init__(origin)
         self.value = value
+
+    def to_sympy(self) -> sympy.Expr:
+        return self.value._sympy_()
 
     @property
     def python_type(self) -> type[float | int | bool]:

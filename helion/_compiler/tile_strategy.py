@@ -75,6 +75,9 @@ class TileStrategy:
     def shape_str(self, shape: Sequence[int | torch.SymInt]) -> str:
         raise NotImplementedError
 
+    def expand_str(self, shape: Sequence[int | torch.SymInt], i: int) -> str:
+        raise NotImplementedError
+
     @classmethod
     def _get_block_index(cls, size: int | torch.SymInt | sympy.Expr) -> int | None:
         if isinstance(size, torch.SymInt):
@@ -101,6 +104,7 @@ class FlattenedTileStrategy(TileStrategy):
 
     def codegen_grid(self, state: CodegenState, block_indices: list[int]) -> None:
         env = CompileEnvironment.current()
+        dtype = env.triton_index_type()
         total_numel = sympy.S.One
         device_fn = state.device_function
         offsets_var = device_fn.new_var("offsets")
@@ -113,7 +117,7 @@ class FlattenedTileStrategy(TileStrategy):
         )
         state.device_function.constexpr_arg(block_size_var)
         state.add_statement(
-            f"{offsets_var} = tl.program_id(0) * ({block_size_var}) + tl.arange(0, {block_size_var})"
+            f"{offsets_var} = tl.program_id(0) * ({block_size_var}) + tl.arange(0, {block_size_var}).to({dtype})"
         )
         for i, block_idx in enumerate(self._reorder(block_indices)):
             # need to get the block size
@@ -169,26 +173,53 @@ class FlattenedTileStrategy(TileStrategy):
                     spec.allow_flattened = False
                     break
 
-    def shape_str(self, shape: Sequence[int | torch.SymInt]) -> str:
+    def _compact_shape(
+        self, shape: Sequence[int | torch.SymInt]
+    ) -> tuple[int, list[int]]:
         # TODO(jansel): support multiple block size groups here (mirror above behavior)
         num_block_sizes = len(CompileEnvironment.current().block_sizes)
         seen_block_size: int = -1
+        output_rank = 0
         output = []
         for s in shape:
             block_size_idx = self._get_block_index(s)
             if block_size_idx is None:
                 assert seen_block_size == -1
-                output.append(self.fn.literal_expr(s))
+                output.append(output_rank)
+                output_rank += 1
             else:
                 if seen_block_size == -1:
                     seen_block_size = block_size_idx
-                    output.append(self.block_size_var(-1))  # single collapsed dim
+                    output.append(output_rank)
+                    output_rank += 1
                 else:
                     assert seen_block_size + 1 == block_size_idx
                     seen_block_size = block_size_idx
-                if seen_block_size == num_block_sizes:
+                    output.append(output[-1])
+                if seen_block_size == num_block_sizes - 1:
                     seen_block_size = -1
-        assert seen_block_size in (-1, num_block_sizes - 1)
+        assert seen_block_size == -1
+        return output_rank, output
+
+    def shape_str(self, shape: Sequence[int | torch.SymInt]) -> str:
+        rank, compacted = self._compact_shape(shape)
+        output: list[str | None] = [None for _ in range(rank)]
+        assert len(compacted) == len(shape)
+        for i, s in zip(compacted, shape):
+            block_size_idx = self._get_block_index(s)
+            if block_size_idx is None:
+                assert output[i] is None
+                output[i] = self.fn.literal_expr(s)
+            else:
+                output[i] = self.block_size_var(-1)
+        return f"[{', '.join(map(str, output))}]"
+
+    def expand_str(self, shape: Sequence[int | torch.SymInt], i: int) -> str:
+        rank, compacted = self._compact_shape(shape)
+        output = ["None"] * rank
+        output[compacted[i]] = ":"
+        if output == [":"]:
+            return ""
         return f"[{', '.join(output)}]"
 
 
@@ -216,14 +247,10 @@ class NDTileStrategy(TileStrategy):
     def block_size_var(self, block_idx: int) -> str | None:
         return self.block_size_vars[block_idx]
 
-    def _expand(self, dim: int) -> str:
-        result = ["None"] * self.nontrivial_block_sizes
-        result[dim] = ":"
-        return ", ".join(result)
-
     def codegen_grid(self, state: CodegenState, block_indices: list[int]) -> None:
         env = CompileEnvironment.current()
         device_fn = state.device_function
+        dtype = env.triton_index_type()
         block_sizes = next(self.block_sizes)
         assert isinstance(block_sizes, list)
         assert len(block_sizes) == len(block_indices)
@@ -248,8 +275,7 @@ class NDTileStrategy(TileStrategy):
                 )
                 state.device_function.constexpr_arg(block_size_var)
                 state.add_statement(
-                    f"{offsets_var} = (tl.program_id({i}) * ({block_size_var}) + tl.arange(0, {block_size_var}))"
-                    f"[{self._expand(dim)}]"
+                    f"{offsets_var} = tl.program_id({i}) * ({block_size_var}) + tl.arange(0, ({block_size_var})).to({dtype})"
                 )
                 state.add_statement(
                     f"{mask_var} = ({offsets_var} < ({device_fn.sympy_expr(numel)}))"
@@ -261,7 +287,10 @@ class NDTileStrategy(TileStrategy):
             else:
                 self.mask_vars[block_idx] = None
                 self.block_size_vars[block_idx] = None
-                state.add_statement(f"{offsets_var} = tl.program_id({i})")
+                dtype = CompileEnvironment.current().triton_index_type()
+                state.add_statement(
+                    f"{offsets_var} = tl.program_id({i}) + tl.zeros([1], {dtype})"
+                )
                 grid.append(HostFunction.current().sympy_expr(numel))
         state.device_function.set_grid_expr(expr_from_string(f"({', '.join(grid)},)"))
 
@@ -273,7 +302,26 @@ class NDTileStrategy(TileStrategy):
             result.append(self.fn.literal_expr(s))
         return f"[{', '.join(result)}]"
 
+    def expand_str(self, shape: Sequence[int | torch.SymInt], i: int) -> str:
+        assert 0 <= i < len(shape)
+        result = []
+        nextval = "None"
+        for j, s in enumerate(shape):
+            if not self.is_dropped_size(s):
+                result.append(nextval)
+                nextval = "None"
+            if i == j:
+                if result:
+                    result[-1] = ":"
+                else:
+                    nextval = ":"
+        if result == [":"]:
+            return ""
+        return f"[{', '.join(result)}]"
+
     def is_dropped_size(self, size: int | torch.SymInt) -> bool:
+        # TODO(jansel): enable this optimization
+        """
         if isinstance(size, torch.SymInt):
             if isinstance(sym := size._sympy_(), sympy.Symbol):
                 if isinstance(
@@ -281,4 +329,6 @@ class NDTileStrategy(TileStrategy):
                     BlockSizeOrigin,
                 ):
                     return self.block_size_vars[origin.block_size_idx] is None
+        return False
+        """
         return False

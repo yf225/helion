@@ -11,11 +11,10 @@ from helion.autotuner.config_spec import DEFAULT_NUM_WARPS
 class Config(Mapping[str, object]):
     config: dict[str, object]
 
-    def __init__(
-        self, config: dict[str, object] | Config | None = None, **kwargs: object
-    ) -> None:
+    def __init__(self, config: object = None, **kwargs: object) -> None:
         if config is not None:
             assert not kwargs
+            assert isinstance(config, (dict, Config))
             self.config: dict[str, object] = {**config}
         else:
             self.config: dict[str, object] = kwargs

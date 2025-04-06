@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     import types
 
+    from ..autotuner import ConfigSpec
+
     ConfigLike = Config | dict[str, object]
 
 
@@ -116,6 +118,10 @@ class BoundKernel:
                 for name, arg in zip(self.kernel.signature.parameters, args)
             ]
             self.host_fn: HostFunction = HostFunction(self.kernel.fn, self.fake_args)
+
+    @property
+    def config_spec(self) -> ConfigSpec:
+        return self.env.config_spec
 
     def to_triton_code(self, config: ConfigLike) -> str:
         with self.env:

@@ -19,7 +19,9 @@ from .compile_environment import CompileEnvironment
 from .device_function import DeviceFunction
 from .inductor_lowering import codegen_call_with_graph
 from .type_propagation import CallableType
+from .type_propagation import LiteralType
 from .type_propagation import SequenceType
+from .type_propagation import SymIntType
 from .type_propagation import TensorType
 from .type_propagation import TileIndexType
 from .type_propagation import TypeInfo
@@ -295,23 +297,43 @@ class GenerateAST(ast.NodeVisitor):
 
     @device_only
     def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
+        value = node.value
+        assert isinstance(value, ExtendedAST)
+        if not isinstance(value._type_info, TensorType):
+            raise exc.ExpectedTensorName(value._type_info)
         # TODO(jansel): non tensor types?
         # TODO(jansel): de-duplicate redundant loads
-        indexing = self.subscript_indexing(node)
-        return self.lift(
-            expr_from_string(
-                # TODO(jansel): optimize away mask/other?
-                "tl.load(name + offset, mask, other=0)",
-                name=indexing.tensor_ref.node,
-                offset=indexing.index_expr,
-                mask=indexing.mask_expr,
+
+        if value._type_info.origin.is_host():
+            indexing = self.subscript_indexing(node)
+            extra = ", other=0" if indexing.has_mask() else ""
+            return self.lift(
+                expr_from_string(
+                    # TODO(jansel): optimize away mask/other?
+                    f"tl.load(name + offset, mask{extra})",
+                    name=indexing.tensor_ref.node,
+                    offset=indexing.index_expr,
+                    mask=indexing.mask_expr,
+                )
             )
+        items = self.slice_type_infos(node)
+        output_keys = []
+        for item in items:
+            if not item.is_literal():
+                raise exc.InvalidIndexingType(item)
+            val = item.as_literal()
+            if val is None:
+                output_keys.append("None")
+            elif isinstance(val, slice) and repr(val) == "slice(None, None, None)":
+                output_keys.append(":")
+            else:
+                raise exc.InvalidIndexingType(repr(val))
+        return expr_from_string(
+            f"base[{', '.join(output_keys)}]",
+            base=self.lift(self.visit(node.value)),
         )
 
-    def subscript_indexing(self, node: ast.Subscript) -> SubscriptIndexing:
-        assert isinstance(node.value, ExtendedAST)
-        with node.value:
-            tensor_ref = self.tensor_reference(node.value)
+    def slice_type_infos(self, node: ast.Subscript) -> list[TypeInfo]:
         slice_node = node.slice
         assert isinstance(slice_node, ExtendedAST)
         key = slice_node._type_info
@@ -319,20 +341,49 @@ class GenerateAST(ast.NodeVisitor):
             keys = key.unpack()
         else:
             keys = [key]
-        # TODO(jansel): need to rewrite this to traverse the slice
+        return keys
+
+    def subscript_indexing(self, node: ast.Subscript) -> SubscriptIndexing:
+        assert isinstance(node, ExtendedAST)
+        assert isinstance(node.value, ExtendedAST)
+        with node.value:
+            tensor_ref = self.tensor_reference(node.value)
+        keys = self.slice_type_infos(node)
+        output_size = [*node._type_info.proxy().size()]
+        output_idx = 0
         index_values = []
         mask_values = {}
+        dtype = CompileEnvironment.current().triton_index_type()
         for k in keys:
             if isinstance(k, TileIndexType):
-                index_values.append(
-                    self.device_function.tile_strategy.index_var(k.block_size_idx)
+                index = self.device_function.tile_strategy.index_var(k.block_size_idx)
+                expand = self.device_function.tile_strategy.expand_str(
+                    output_size, output_idx
                 )
+                index_values.append(f"({index}){expand}")
                 if mask := self.device_function.tile_strategy.mask_var(
                     k.block_size_idx
                 ):
-                    mask_values.setdefault(mask)
+                    mask_values.setdefault(f"({mask}){expand}")
+                output_idx += 1
+            elif isinstance(k, LiteralType):
+                val = k.as_literal()
+                if val is None:
+                    output_idx += 1
+                elif isinstance(val, int):
+                    expand = self.device_function.tile_strategy.expand_str(
+                        output_size, output_idx
+                    )
+                    index_values.append(f"tl.full([1], {val!r}, {dtype}){expand}")
+            elif isinstance(k, SymIntType):
+                expand = self.device_function.tile_strategy.expand_str(
+                    output_size, output_idx
+                )
+                val = self.device_function.sympy_expr(k.to_sympy())
+                index_values.append(f"tl.full([1], {val}, {dtype}){expand}")
             else:
                 raise exc.InvalidIndexingType(k)
+        assert len(output_size) == output_idx
 
         fake_value = tensor_ref.type_info.fake_value
         if len(index_values) != fake_value.ndim:
@@ -342,6 +393,10 @@ class GenerateAST(ast.NodeVisitor):
             if fake_value.size(i) != 1:
                 stride = self.device_function.tensor_stride(fake_value, i).name
                 index_expr.append(f"{idx} * {stride}")
+        if not index_expr:
+            shape_str = self.device_function.tile_strategy.shape_str(output_size)
+            index_expr.append(f"tl.zeros({shape_str}, {dtype})")
+
         return SubscriptIndexing(
             tensor_ref,
             expr_from_string("+".join(index_expr)),
@@ -351,7 +406,7 @@ class GenerateAST(ast.NodeVisitor):
     def tensor_reference(self, node: ast.AST) -> TensorReference:
         assert isinstance(node, ExtendedAST)
         if not isinstance(node, ast.Name):
-            raise exc.ExpectedTensorName(type(node.value).__name__)
+            raise exc.ExpectedTensorName(type(node).__name__)
         if not isinstance(type_info := node._type_info, TensorType):
             raise exc.ExpectedTensorName(node._type_info)
         if node._type_info.origin.is_host():
@@ -379,6 +434,11 @@ class SubscriptIndexing(NamedTuple):
     tensor_ref: TensorReference
     index_expr: ast.AST
     mask_expr: ast.AST
+
+    def has_mask(self) -> bool:
+        return not (
+            isinstance(self.mask_expr, ast.Constant) and self.mask_expr.value is None
+        )
 
 
 def generate_ast(func: HostFunction, config: Config) -> ast.AST:
