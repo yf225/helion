@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from typing import Callable
+from typing import TypeVar
 
 import torch
-from torch.utils._pytree import tree_map
+from torch.utils._pytree import tree_map_only
 
 from .. import exc
-from ..language._decorators import is_api_func
 from .compile_environment import CompileEnvironment
 
 OpOverload = torch._ops.OpOverload
+
+if TYPE_CHECKING:
+    _T = TypeVar("_T")
 
 
 class TileIndexProxy:
@@ -25,19 +29,16 @@ class TileIndexProxy:
         args: tuple[object, ...] = (),
         kwargs: dict[str, object] | None = None,
     ) -> object:
-        if kwargs is None:
-            kwargs = {}
         if func is torch.Tensor.__getitem__:
             raise NotImplementedError  # TODO(jansel): implement this
         if func is torch.Tensor.__setitem__:
             raise NotImplementedError  # TODO(jansel): implement this
-        if is_api_func(func) and func._tiles_as_sizes:
-            args, kwargs = tree_map(_tiles_to_sizes, (args, kwargs))
-            return func(*args, **kwargs)
         raise exc.IncorrectTileUsage(func)
 
+    @classmethod
+    def tiles_to_sizes(cls, it: _T) -> _T:
+        return tree_map_only(TileIndexProxy, cls._tile_to_size, it)
 
-def _tiles_to_sizes(x: object) -> object:
-    if isinstance(x, TileIndexProxy):
+    @staticmethod
+    def _tile_to_size(x: TileIndexProxy) -> torch.SymInt:
         return CompileEnvironment.current().block_sizes[x.block_size_index].var
-    return x

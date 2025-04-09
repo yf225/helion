@@ -61,14 +61,14 @@ def _broadcast_fn_kernel(_a, _b, _out0, _out1, _a_size_0, _a_size_1, _a_stride_0
     _mask_0 = _block_idx_0 < _a_size_0
     _block_idx_1 = tl.program_id(1) * _BLOCK_SIZE_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
     _mask_1 = _block_idx_1 < _a_size_1
-    _v_0 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None] | _mask_1[None, :], other=0)
-    _v_1 = tl.load(_b + _block_idx_0[:, None] * _b_stride_0, _mask_0[:, None], other=0)
-    _v_2 = _v_0 + _v_1
-    tl.store(_out0 + (_block_idx_0[:, None] * _out0_stride_0 + _block_idx_1[None, :] * _out0_stride_1), _v_2, _mask_0[:, None] | _mask_1[None, :])
-    _v_3 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None] | _mask_1[None, :], other=0)
-    _v_4 = tl.load(_b + _block_idx_1[None, :] * _b_stride_0, _mask_1[None, :], other=0)
-    _v_5 = _v_3 + _v_4
-    tl.store(_out1 + (_block_idx_0[:, None] * _out1_stride_0 + _block_idx_1[None, :] * _out1_stride_1), _v_5, _mask_0[:, None] | _mask_1[None, :])
+    _load = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None] | _mask_1[None, :], other=0)
+    _load_1 = tl.load(_b + _block_idx_0[:, None] * _b_stride_0, _mask_0[:, None], other=0)
+    _v_0 = _load + _load_1
+    tl.store(_out0 + (_block_idx_0[:, None] * _out0_stride_0 + _block_idx_1[None, :] * _out0_stride_1), _v_0, _mask_0[:, None] | _mask_1[None, :])
+    _load_2 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None] | _mask_1[None, :], other=0)
+    _load_3 = tl.load(_b + _block_idx_1[None, :] * _b_stride_0, _mask_1[None, :], other=0)
+    _v_1 = _load_2 + _load_3
+    tl.store(_out1 + (_block_idx_0[:, None] * _out1_stride_0 + _block_idx_1[None, :] * _out1_stride_1), _v_1, _mask_0[:, None] | _mask_1[None, :])
 
 def broadcast_fn(a, b):
     out0 = torch.empty_like(a)
@@ -95,14 +95,14 @@ def _broadcast_fn_kernel(_a, _b, _out0, _out1, _a_size_0, _a_size_1, _a_stride_0
     _mask_1 = _block_idx_1 < _a_size_1
     _block_idx_0 = tl.program_id(1) * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
     _mask_0 = _block_idx_0 < _a_size_0
-    _v_0 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None] | _mask_1[None, :], other=0)
-    _v_1 = tl.load(_b + _block_idx_0[:, None] * _b_stride_0, _mask_0[:, None], other=0)
-    _v_2 = _v_0 + _v_1
-    tl.store(_out0 + (_block_idx_0[:, None] * _out0_stride_0 + _block_idx_1[None, :] * _out0_stride_1), _v_2, _mask_0[:, None] | _mask_1[None, :])
-    _v_3 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None] | _mask_1[None, :], other=0)
-    _v_4 = tl.load(_b + _block_idx_1[None, :] * _b_stride_0, _mask_1[None, :], other=0)
-    _v_5 = _v_3 + _v_4
-    tl.store(_out1 + (_block_idx_0[:, None] * _out1_stride_0 + _block_idx_1[None, :] * _out1_stride_1), _v_5, _mask_0[:, None] | _mask_1[None, :])
+    _load = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None] | _mask_1[None, :], other=0)
+    _load_1 = tl.load(_b + _block_idx_0[:, None] * _b_stride_0, _mask_0[:, None], other=0)
+    _v_0 = _load + _load_1
+    tl.store(_out0 + (_block_idx_0[:, None] * _out0_stride_0 + _block_idx_1[None, :] * _out0_stride_1), _v_0, _mask_0[:, None] | _mask_1[None, :])
+    _load_2 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None] | _mask_1[None, :], other=0)
+    _load_3 = tl.load(_b + _block_idx_1[None, :] * _b_stride_0, _mask_1[None, :], other=0)
+    _v_1 = _load_2 + _load_3
+    tl.store(_out1 + (_block_idx_0[:, None] * _out1_stride_0 + _block_idx_1[None, :] * _out1_stride_1), _v_1, _mask_0[:, None] | _mask_1[None, :])
 
 def broadcast_fn(a, b):
     out0 = torch.empty_like(a)
@@ -130,14 +130,14 @@ def _broadcast_fn_kernel(_a, _b, _out0, _out1, _a_size_0, _a_stride_0, _a_stride
     _block_idx_0 = tl.program_id(0) * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
     _mask_0 = _block_idx_0 < _a_size_0
     _block_idx_1 = tl.program_id(1) + tl.zeros([1], tl.int32)
-    _v_0 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None], other=0)
-    _v_1 = tl.load(_b + _block_idx_0[:, None] * _b_stride_0, _mask_0[:, None], other=0)
-    _v_2 = _v_0 + _v_1
-    tl.store(_out0 + (_block_idx_0[:, None] * _out0_stride_0 + _block_idx_1[None, :] * _out0_stride_1), _v_2, _mask_0[:, None])
-    _v_3 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None], other=0)
-    _v_4 = tl.load(_b + _block_idx_1[None, :] * _b_stride_0, None)
-    _v_5 = _v_3 + _v_4
-    tl.store(_out1 + (_block_idx_0[:, None] * _out1_stride_0 + _block_idx_1[None, :] * _out1_stride_1), _v_5, _mask_0[:, None])
+    _load = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None], other=0)
+    _load_1 = tl.load(_b + _block_idx_0[:, None] * _b_stride_0, _mask_0[:, None], other=0)
+    _v_0 = _load + _load_1
+    tl.store(_out0 + (_block_idx_0[:, None] * _out0_stride_0 + _block_idx_1[None, :] * _out0_stride_1), _v_0, _mask_0[:, None])
+    _load_2 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None], other=0)
+    _load_3 = tl.load(_b + _block_idx_1[None, :] * _b_stride_0, None)
+    _v_1 = _load_2 + _load_3
+    tl.store(_out1 + (_block_idx_0[:, None] * _out1_stride_0 + _block_idx_1[None, :] * _out1_stride_1), _v_1, _mask_0[:, None])
 
 def broadcast_fn(a, b):
     out0 = torch.empty_like(a)
@@ -164,14 +164,14 @@ def _broadcast_fn_kernel(_a, _b, _out0, _out1, _a_size_1, _a_stride_0, _a_stride
     _block_idx_0 = tl.program_id(0) + tl.zeros([1], tl.int32)
     _block_idx_1 = tl.program_id(1) * _BLOCK_SIZE_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
     _mask_1 = _block_idx_1 < _a_size_1
-    _v_0 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_1[None, :], other=0)
-    _v_1 = tl.load(_b + _block_idx_0[:, None] * _b_stride_0, None)
-    _v_2 = _v_0 + _v_1
-    tl.store(_out0 + (_block_idx_0[:, None] * _out0_stride_0 + _block_idx_1[None, :] * _out0_stride_1), _v_2, _mask_1[None, :])
-    _v_3 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_1[None, :], other=0)
-    _v_4 = tl.load(_b + _block_idx_1[None, :] * _b_stride_0, _mask_1[None, :], other=0)
-    _v_5 = _v_3 + _v_4
-    tl.store(_out1 + (_block_idx_0[:, None] * _out1_stride_0 + _block_idx_1[None, :] * _out1_stride_1), _v_5, _mask_1[None, :])
+    _load = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_1[None, :], other=0)
+    _load_1 = tl.load(_b + _block_idx_0[:, None] * _b_stride_0, None)
+    _v_0 = _load + _load_1
+    tl.store(_out0 + (_block_idx_0[:, None] * _out0_stride_0 + _block_idx_1[None, :] * _out0_stride_1), _v_0, _mask_1[None, :])
+    _load_2 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_1[None, :], other=0)
+    _load_3 = tl.load(_b + _block_idx_1[None, :] * _b_stride_0, _mask_1[None, :], other=0)
+    _v_1 = _load_2 + _load_3
+    tl.store(_out1 + (_block_idx_0[:, None] * _out1_stride_0 + _block_idx_1[None, :] * _out1_stride_1), _v_1, _mask_1[None, :])
 
 def broadcast_fn(a, b):
     out0 = torch.empty_like(a)
@@ -213,18 +213,19 @@ def _fn_kernel(_a, _out0, _out1, _out2, _a_size_0, _a_size_1, _a_stride_0, _a_st
     _mask_0 = _block_idx_0 < _a_size_0
     _block_idx_1 = tl.program_id(1) * _BLOCK_SIZE_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
     _mask_1 = _block_idx_1 < _a_size_1
-    _v_0 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None] | _mask_1[None, :], other=0)
-    _v_1 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + tl.full([1], 3, tl.int32)[None, :] * _a_stride_1), _mask_0[:, None], other=0)
-    _v_2 = _v_0 + _v_1
-    tl.store(_out0 + (_block_idx_0[:, None] * _out0_stride_0 + _block_idx_1[None, :] * _out0_stride_1), _v_2, _mask_0[:, None] | _mask_1[None, :])
-    _v_3 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None] | _mask_1[None, :], other=0)
-    _v_4 = tl.load(_a + (tl.full([1], 11, tl.int32) * _a_stride_0 + _block_idx_1 * _a_stride_1), _mask_1, other=0)
-    _v_5 = _v_3 + _v_4[None, :]
-    tl.store(_out1 + (_block_idx_0[:, None] * _out1_stride_0 + _block_idx_1[None, :] * _out1_stride_1), _v_5, _mask_0[:, None] | _mask_1[None, :])
-    _v_6 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None] | _mask_1[None, :], other=0)
-    _v_7 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + tl.full([1], _idx1, tl.int32)[None, :] * _a_stride_1), _mask_0[:, None], other=0)
-    _v_8 = _v_6 + _v_7
-    tl.store(_out2 + (_block_idx_0[:, None] * _out2_stride_0 + _block_idx_1[None, :] * _out2_stride_1), _v_8, _mask_0[:, None] | _mask_1[None, :])
+    _load = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None] | _mask_1[None, :], other=0)
+    _load_1 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + tl.full([1], 3, tl.int32)[None, :] * _a_stride_1), _mask_0[:, None], other=0)
+    _v_0 = _load + _load_1
+    tl.store(_out0 + (_block_idx_0[:, None] * _out0_stride_0 + _block_idx_1[None, :] * _out0_stride_1), _v_0, _mask_0[:, None] | _mask_1[None, :])
+    _load_2 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None] | _mask_1[None, :], other=0)
+    _load_3 = tl.load(_a + (tl.full([1], 11, tl.int32) * _a_stride_0 + _block_idx_1 * _a_stride_1), _mask_1, other=0)
+    _subscript = _load_3[None, :]
+    _v_1 = _load_2 + _subscript
+    tl.store(_out1 + (_block_idx_0[:, None] * _out1_stride_0 + _block_idx_1[None, :] * _out1_stride_1), _v_1, _mask_0[:, None] | _mask_1[None, :])
+    _load_4 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + _block_idx_1[None, :] * _a_stride_1), _mask_0[:, None] | _mask_1[None, :], other=0)
+    _load_5 = tl.load(_a + (_block_idx_0[:, None] * _a_stride_0 + tl.full([1], _idx1, tl.int32)[None, :] * _a_stride_1), _mask_0[:, None], other=0)
+    _v_2 = _load_4 + _load_5
+    tl.store(_out2 + (_block_idx_0[:, None] * _out2_stride_0 + _block_idx_1[None, :] * _out2_stride_1), _v_2, _mask_0[:, None] | _mask_1[None, :])
 
 def fn(a, idx1):
     out0 = torch.empty_like(a)

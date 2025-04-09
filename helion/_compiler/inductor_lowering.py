@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 from typing import TYPE_CHECKING
+from typing import NamedTuple
 
 import sympy
 import torch
@@ -26,14 +27,19 @@ from torch.fx.node import map_arg
 from ..exc import InductorLoweringError
 from ..language._decorators import APIFunc
 from ..language._decorators import is_api_func
+from .ast_extension import create
 from .ast_extension import expr_from_string
+from .ast_extension import statement_from_string
 from .compile_environment import CompileEnvironment
 
 if TYPE_CHECKING:
+    from .. import Config
+    from .device_function import DeviceFunction
     from .generate_ast import GenerateAST
+    from .tile_strategy import TileStrategy
 
 
-def process_graph_in_type_propagation(gm: torch.fx.GraphModule) -> None:
+def prepare_graph_lowerings(gm: torch.fx.GraphModule) -> None:
     with compile_lock:
         graph_lowering = GraphLowering(
             gm, shape_env=CompileEnvironment.current().shape_env
@@ -48,21 +54,20 @@ def process_graph_in_type_propagation(gm: torch.fx.GraphModule) -> None:
                 }, node.op
                 if node.op == "call_function":
                     prior_buffers = len(graph_lowering.buffers)
-                    node.meta["lowering"] = process_node_in_type_propagation(
-                        graph_lowering, node
-                    )
+                    node.meta["lowering"] = prepare_node_lowering(graph_lowering, node)
                     if len(graph_lowering.buffers) > prior_buffers + 1:
                         raise InductorLoweringError(
                             f"Lowering {node.op} resulted in {len(graph_lowering.buffers) - prior_buffers} buffers, expected 1."
                         )
 
 
-def process_node_in_type_propagation(
+def prepare_node_lowering(
     graph_lowering: GraphLowering,
     node: Node,
 ) -> Lowering:
-    if is_api_func(node.target):
-        return APIFuncLowering(node.target, node)
+    if is_api_func(api := node.target):
+        APIFuncLowering.normalize_args_kwargs(api, node)
+        return APIFuncLowering(api)
 
     def convert_arg(arg: Node) -> TensorBox:
         example = arg.meta["val"]
@@ -113,11 +118,7 @@ def _unpack_symint(x: torch.SymInt | int) -> sympy.Expr:
 
 
 class Lowering:
-    def codegen(self, cg: GenerateAST, input_asts: list[ast.AST]) -> ast.AST:
-        raise NotImplementedError
-
-    @property
-    def num_inputs(self) -> int:
+    def codegen(self, ctx: GraphInterpreter, node: torch.fx.Node) -> ast.AST:
         raise NotImplementedError
 
 
@@ -126,21 +127,28 @@ class InductorLowering(Lowering):
     buffer: ComputedBuffer
     input_names: list[str]
 
-    @property
-    def num_inputs(self) -> int:
-        return len(self.input_names)
+    def input_asts(self, ctx: GraphInterpreter, node: torch.fx.Node) -> list[ast.AST]:
+        input_asts: list[ast.AST] = []
+        map_arg(
+            (node.args, node.kwargs),
+            lambda arg: input_asts.append(ctx.env[arg]),
+        )
+        assert len(input_asts) == len(self.input_names)
+        return input_asts
 
-    def codegen(self, cg: GenerateAST, input_asts: list[ast.AST]) -> ast.AST:
+    def codegen(self, ctx: GraphInterpreter, node: torch.fx.Node) -> ast.AST:
         raise NotImplementedError(
             f"codegen not implemented for {type(self).__name__}: {self.buffer}"
         )
 
 
 class PointwiseLowering(InductorLowering):
-    def codegen(self, cg: GenerateAST, input_asts: list[ast.AST]) -> ast.AST:
+    def codegen(self, ctx: GraphInterpreter, node: torch.fx.Node) -> ast.AST:
         # pyre-ignore[19]
         with V.set_ops_handler(
-            GenerateASTFromInductor(cg, dict(zip(self.input_names, input_asts)))
+            GenerateASTFromInductor(
+                ctx.cg, dict(zip(self.input_names, self.input_asts(ctx, node)))
+            ),
         ):
             indices = [
                 sympy.Symbol(f"i{n}") for n in range(len(self.buffer.data.ranges))
@@ -156,24 +164,33 @@ class ReductionLowering(InductorLowering):
 @dataclasses.dataclass
 class APIFuncLowering(Lowering):
     api_func: APIFunc
-    node: torch.fx.Node
 
-    def codegen(self, cg: GenerateAST, input_asts: list[ast.AST]) -> ast.AST:
-        from .generate_ast import CodegenState
+    def codegen(self, ctx: GraphInterpreter, node: torch.fx.Node) -> ast.AST:
+        assert not node.kwargs
+        ast_args = [*map_arg(node.args, lambda arg: ctx.env[arg])]
+        proxy_args = [*map_arg(node.args, lambda arg: arg.meta["val"])]
 
-        args, kwargs = map_arg(
-            (self.node.args, self.node.kwargs), lambda arg: arg.meta["val"]
-        )
-        bound = self.api_func._signature.bind(*args, **kwargs)
-        bound.apply_defaults()
         assert self.api_func._codegen is not None
         return self.api_func._codegen(
-            CodegenState(cg, fx_node=self.node, proxy_args=[*bound.arguments.values()])
+            CodegenState(
+                ctx.cg,
+                fx_node=node,
+                # pyre-ignore[6]
+                proxy_args=proxy_args,
+                # pyre-ignore[6]
+                ast_args=ast_args,
+            ),
         )
 
-    @property
-    def num_inputs(self) -> int:
-        return len(self.node._input_nodes)
+    @staticmethod
+    def normalize_args_kwargs(
+        api_func: APIFunc,
+        node: torch.fx.Node,
+    ) -> None:
+        bound = api_func._signature.bind(*node.args, **node.kwargs)
+        bound.apply_defaults()
+        node.args = (*bound.arguments.values(),)
+        node.kwargs = {}
 
 
 class GenerateASTFromInductor(DefaultHandler):
@@ -211,21 +228,64 @@ class GraphInterpreter(Interpreter):
     def run_node(self, n: Node) -> object:
         if n.op == "call_function":
             with self._set_current_node(n):
-                input_asts: list[ast.AST] = []
-                map_arg(
-                    (n.args, n.kwargs),
-                    lambda arg: input_asts.append(self.env[arg]),
-                )
-                lowering: InductorLowering = n.meta["lowering"]
-                assert len(input_asts) == lowering.num_inputs
-                return lowering.codegen(self.cg, input_asts)
+                lowering: Lowering = n.meta["lowering"]
+                result = lowering.codegen(self, n)
+                if not isinstance(result, ast.AST):
+                    assert isinstance(
+                        result, (int, torch.SymInt, torch.SymFloat, torch.SymBool)
+                    )
+                    return result
+                assert isinstance(result, ast.expr)
+                if len(n.users) > 0:
+                    if isinstance(result, (ast.Name, ast.Constant)):
+                        return result
+                    name = self.cg.device_function.new_var(n.name)
+                    self.cg.add_statement(
+                        statement_from_string(f"{name} = result", result=result)
+                    )
+                    return create(ast.Name, id=name, ctx=ast.Load())
+                if not isinstance(result, (ast.Name, ast.Constant)):
+                    self.cg.add_statement(create(ast.Expr, value=result))
+                return None
         return super().run_node(n)
 
 
 def codegen_call_with_graph(
     cg: GenerateAST, gm: torch.fx.GraphModule, args: list[ast.AST]
-) -> ast.AST:
+) -> None:
     with compile_lock:
-        result = GraphInterpreter(gm, cg).run(*args)
-        assert isinstance(result, ast.AST)
-        return result
+        GraphInterpreter(gm, cg).run(*args)
+
+
+class CodegenState(NamedTuple):
+    codegen: GenerateAST
+    fx_node: torch.fx.Node
+    proxy_args: list[object]
+    ast_args: list[object]
+
+    def proxy_arg(self, i: int) -> object:
+        return self.proxy_args[i]
+
+    def ast_arg(self, i: int) -> ast.AST:
+        rv = self.ast_args[i]
+        assert isinstance(rv, ast.AST), "TODO: convert nested/defaults"
+        return rv
+
+    @property
+    def fake_value(self) -> object:
+        return self.fx_node.meta["val"]
+
+    @property
+    def device_function(self) -> DeviceFunction:
+        return self.codegen.device_function
+
+    @property
+    def tile_strategy(self) -> TileStrategy:
+        return self.codegen.device_function.tile_strategy
+
+    @property
+    def config(self) -> Config:
+        return self.codegen.device_function.config
+
+    def add_statement(self, statement: ast.stmt | str) -> None:
+        return self.codegen.add_statement(statement)

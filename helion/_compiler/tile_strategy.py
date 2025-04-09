@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from ..autotuner.config_spec import BlockSizeSpec
     from ..runtime.config import Config
     from .device_function import DeviceFunction
-    from .generate_ast import CodegenState
+    from .inductor_lowering import CodegenState
 
     _T = TypeVar("_T")
 

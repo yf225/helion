@@ -6,26 +6,21 @@ import contextlib
 import dataclasses
 import functools
 import inspect
-import itertools
+import re
 import types
 from typing import TYPE_CHECKING
 from typing import Callable
 from typing import NoReturn
 from typing import Protocol
 from typing import TypeVar
-from unittest.mock import patch
 
 import sympy
 import torch
-from torch._dynamo.convert_frame import compile_lock
-from torch._inductor.decomposition import select_decomp_table
-from torch.fx.experimental import proxy_tensor
 
 from .. import exc
 from ..autotuner.config_spec import BlockSizeSpec
 from ..autotuner.config_spec import PermutationSpec
 from ..language._decorators import is_api_func
-from ..language.creation_ops import _symnode_dummy_origin
 from .ast_extension import ExtendedAST
 from .ast_extension import LoopType
 from .ast_extension import create
@@ -33,7 +28,6 @@ from .compile_environment import CompileEnvironment
 from .compile_environment import warning
 from .host_function import HostFunction
 from .host_function import SymbolOrigin
-from .inductor_lowering import process_graph_in_type_propagation
 from .source_location import SourceLocation
 from .source_location import current_location
 from .tile_index_proxy import TileIndexProxy
@@ -228,6 +222,9 @@ class TypeInfo:
 
     def __str__(self) -> str:
         return type(self).__name__
+
+    def __repr__(self) -> str:
+        return str(self)
 
     def debug_annotations(self) -> list[str]:
         return [f"{self!s} {self.origin!r}"]
@@ -609,21 +606,17 @@ class CallableType(LiteralType):
         self.value = value
 
     def __str__(self) -> str:
+        return f"{type(self).__name__}({self.name})"
+
+    @property
+    def name(self) -> str:
         try:
-            name = self.value.__qualname__
+            return self.value.__qualname__
         except AttributeError:
             try:
-                name = self.value.__name__
+                return self.value.__name__
             except AttributeError:
-                name = str(self.value)
-        return f"{type(self).__name__}({name})"
-
-    def debug_annotations(self) -> list[str]:
-        result = [*super().debug_annotations()]
-        stack = ExtendedAST.current()
-        if stack and (gm := stack[-1]._graph):
-            result.extend(str(gm.graph).splitlines())
-        return result
+                return str(self.value)
 
     def propagate_call(
         self, args: tuple[TypeInfo, ...], kwargs: dict[str, TypeInfo], origin: Origin
@@ -631,114 +624,45 @@ class CallableType(LiteralType):
         if is_api_func(fn := self.value):
             if fn._is_device_only and origin.is_host():
                 raise exc.DeviceAPIOnHost(fn.__qualname__)
-            if fn._type_function is not None:
-                return fn._type_function(*args, **kwargs, origin=origin)
-            # fall through to tracing
+            assert fn._type_function is not None
+            return fn._type_function(*args, **kwargs, origin=origin)
         # TODO(jansel): add no-tracing mode
 
-        def extract_tensor_inputs(arg: TypeInfo) -> None:
-            if isinstance(arg, TensorType):
-                nonlocal tensor_proxies
-                tensor_proxies.append(arg.proxy())
-
         def warn_wrong_device(arg: TypeInfo) -> None:
-            if isinstance(arg, TensorType):
-                if arg.fake_value.device != env.device:
-                    warning(
-                        exc.WrongDevice(self.value, arg.fake_value.device, env.device)
-                    )
+            if isinstance(arg, TensorType) and arg.fake_value.device != env.device:
+                warning(exc.WrongDevice(self.value, arg.fake_value.device, env.device))
 
+        def to_proxy(arg: TypeInfo) -> object:
+            if isinstance(arg, TensorType):
+                nonlocal input_contains_tensor
+                input_contains_tensor = True
+                warn_wrong_device(arg)
+            elif isinstance(arg, UnknownType):
+                raise exc.TypePropagationError(arg)
+            try:
+                return arg.proxy()
+            except NotImplementedError:
+                raise exc.TracedArgNotSupported(arg) from None
+
+        input_contains_tensor: bool = False
         env: CompileEnvironment = CompileEnvironment.current()
-        tensor_proxies: list[torch.Tensor] = []
-        for x in itertools.chain(args, kwargs.values()):
-            x.tree_map(extract_tensor_inputs)
-        traced_fn = self._embed_literal_args_for_tracing(args, kwargs)
+        proxy_args = [x.tree_map(to_proxy) for x in args]
+        proxy_kwargs = {k: v.tree_map(to_proxy) for k, v in kwargs.items()}
         try:
             output_type = TypeInfo.from_example(
-                traced_fn(*tensor_proxies),
+                self.value(*proxy_args, **proxy_kwargs),
                 origin,
             )
             output_type.tree_map(warn_wrong_device)
-            if isinstance(output_type, UnknownType) or (
-                origin.is_host()
-                and not isinstance(output_type, TensorType)
-                and not tensor_proxies
-            ):
-                # don't make_fx non-tensor ops
-                return output_type
-
-            graph = self._make_fx(
-                traced_fn,
-                *tensor_proxies,
-            )
-            node = ExtendedAST.current()[-1]
-            assert isinstance(node, ast.Call)
-            node._graph = graph
-            if origin.is_host():
-                _warn_graph_contains_disallowed_host_ops(graph)
-            else:
-                process_graph_in_type_propagation(graph)
+            if input_contains_tensor and output_type.contains_tensor():
+                if not re.search("like|new|broadcast", self.name):
+                    warning(exc.TensorOperationInWrapper(self.name))
             return output_type
         except exc.Base:
             raise
         except Exception as e:
             # TODO(jansel): point to other tracing modes
             raise exc.TorchOpTracingError(e) from e
-
-    def _make_fx(
-        self, fn: Callable[..., object], *args: object
-    ) -> torch.fx.GraphModule:
-        """
-        We monkey patch get_proxy_slot to support SymInt/SymFloat/SymBool
-        in the graph without any origin for them.  We instead insert
-        symnode_dummy_origin() in the graph which are ignored in codegen.
-        """
-
-        def _get_proxy_slot(
-            obj: object,
-            tracer: proxy_tensor.PythonKeyTracer,
-            default: object = proxy_tensor.no_default,
-            transform: Callable[[object], object] = lambda x: x,
-        ) -> object:
-            if isinstance(obj, proxy_tensor.py_sym_types):
-                tracker = tracer.symnode_tracker
-                if obj not in tracker:
-                    tracker[obj] = proxy = tracer.create_proxy(
-                        "call_function", _symnode_dummy_origin, (), {}
-                    )
-                    proxy.node.meta["val"] = obj
-                    proxy.force = lambda: proxy
-                return tracker[obj]
-            return get_proxy_slot(obj, tracer, default, transform)
-
-        get_proxy_slot: Callable[..., object] = proxy_tensor.get_proxy_slot
-        with (
-            compile_lock,
-            patch.object(proxy_tensor, "get_proxy_slot", _get_proxy_slot),
-        ):
-            return proxy_tensor.make_fx(fn, decomposition_table=select_decomp_table())(
-                *args
-            )
-
-    def _embed_literal_args_for_tracing(
-        self, args: tuple[TypeInfo, ...], kwargs: dict[str, TypeInfo]
-    ) -> Callable[..., object]:
-        # TODO(jansel): lift closures
-        def wrapped(*tensor_args: torch.Tensor) -> object:
-            def process_arg(arg: TypeInfo) -> object:
-                if isinstance(arg, TensorType):
-                    nonlocal idx
-                    idx += 1
-                    return tensor_args[idx - 1]
-                return arg.proxy()
-
-            idx = 0
-            new_args = [x.tree_map(process_arg) for x in args]
-            new_kwargs = {k: v.tree_map(process_arg) for k, v in kwargs.items()}
-            assert idx == len(tensor_args)
-            return self.value(*new_args, **new_kwargs)
-
-        return wrapped
 
 
 class PythonModuleType(LiteralType):
@@ -1957,17 +1881,3 @@ def propagate_types(func: HostFunction, fake_args: list[object]) -> None:
         prop = TypePropagation(func, local_scope)
         for stmt in func.body:
             prop.visit(stmt)
-
-
-def _warn_graph_contains_disallowed_host_ops(graph: torch.fx.GraphModule) -> None:
-    for node in graph.graph.nodes:
-        if node.op == "call_function":
-            opname = getattr(node.target, "_opname", "")
-            if opname not in {
-                "",
-                "sym_size",
-                "empty",
-                "full",
-                "permute",
-            }:
-                warning(exc.TensorOperationsInHostCall(opname))

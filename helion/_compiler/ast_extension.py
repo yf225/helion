@@ -7,13 +7,12 @@ import typing
 from typing import TYPE_CHECKING
 from typing import TypeVar
 
+from .. import exc
 from .source_location import SourceLocation
 from .source_location import current_location
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    import torch
 
     from .type_propagation import TypeInfo
 
@@ -55,7 +54,6 @@ class ExtendedAST:
         self._type_info: TypeInfo | None = _type_info
         self._location: SourceLocation = _location
         self._loop_type: LoopType = _loop_type
-        self._graph: torch.fx.GraphModule | None = None
 
     def new(self, fields: dict[str, object]) -> ExtendedAST:
         result = self.__class__(
@@ -202,3 +200,20 @@ def convert(node: ast.AST) -> ast.AST:
         return [convert(item) for item in node]
     else:
         return node
+
+
+class NodeVisitor(ast.NodeVisitor):
+    def visit(self, node: ast.AST) -> ast.AST:
+        assert isinstance(node, ExtendedAST)
+        with node:
+            try:
+                visitor = getattr(
+                    self,
+                    f"visit_{node.__class__.__name__}",
+                    self.generic_visit,
+                )
+                return visitor(node)
+            except exc.Base:
+                raise
+            except Exception as e:
+                raise exc.InternalError(e) from e

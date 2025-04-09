@@ -63,7 +63,20 @@ def add(x, y):
         # Name: TensorType([y_size0, x_size1], torch.int32) GetItemOrigin(value=SourceOrigin(location=<SourceLocation basic_kernels.py:8>), key=1)
         # Name: SequenceType([TileIndexType(0), TileIndexType(1)]) SourceOrigin(location=<SourceLocation basic_kernels.py:10>)
         out[tile] = x[tile] + y[tile]
-    return out""",
+    return out
+
+def device_ir():
+    # No stacktrace found for following nodes
+    x: "i32[s17, s27]" = helion__compiler_tracing_ops__host_tensor('x')
+    block_size0: "Sym(u0)" = helion__compiler_tracing_ops__get_symnode('block_size0')
+    block_size1: "Sym(u1)" = helion__compiler_tracing_ops__get_symnode('block_size1')
+    load: "i32[u0, u1]" = helion_language_memory_ops_load(x, [block_size0, block_size1]);  x = None
+    y: "i32[s17, s27]" = helion__compiler_tracing_ops__host_tensor('y')
+    load_1: "i32[u0, u1]" = helion_language_memory_ops_load(y, [block_size0, block_size1]);  y = None
+    add: "i32[u0, u1]" = torch.ops.aten.add.Tensor(load, load_1);  load = load_1 = None
+    out: "i32[s17, s27]" = helion__compiler_tracing_ops__host_tensor('out')
+    store = helion_language_memory_ops_store(out, [block_size0, block_size1], add);  out = block_size0 = block_size1 = add = store = None
+    return None""",
         )
 
     def test_torch_ops_pointwise(self):
@@ -111,7 +124,22 @@ def torch_ops_pointwise(x, y):
         # Name: TensorType([y_size0], torch.int32) ArgumentOrigin(name='y')
         # Name: SequenceType([TileIndexType(0)]) SourceOrigin(location=<SourceLocation basic_kernels.py:18>)
         out[tile] = torch.sigmoid(torch.add(torch.sin(x[tile]), torch.cos(y[tile])))
-    return out""",
+    return out
+
+def device_ir():
+    # No stacktrace found for following nodes
+    x: "i32[s77]" = helion__compiler_tracing_ops__host_tensor('x')
+    block_size0: "Sym(u0)" = helion__compiler_tracing_ops__get_symnode('block_size0')
+    load: "i32[u0]" = helion_language_memory_ops_load(x, [block_size0]);  x = None
+    sin: "f32[u0]" = torch.ops.aten.sin.default(load);  load = None
+    y: "i32[s17]" = helion__compiler_tracing_ops__host_tensor('y')
+    load_1: "i32[u0]" = helion_language_memory_ops_load(y, [block_size0]);  y = None
+    cos: "f32[u0]" = torch.ops.aten.cos.default(load_1);  load_1 = None
+    add: "f32[u0]" = torch.ops.aten.add.Tensor(sin, cos);  sin = cos = None
+    sigmoid: "f32[u0]" = torch.ops.aten.sigmoid.default(add);  add = None
+    out: "i32[s77]" = helion__compiler_tracing_ops__host_tensor('out')
+    store = helion_language_memory_ops_store(out, [block_size0], sigmoid);  out = block_size0 = sigmoid = store = None
+    return None""",
         )
 
     def test_all_ast_nodes(self):
@@ -535,7 +563,20 @@ def all_ast_nodes(x, y):
         # Name: TensorType([y_size0, x_size1], torch.int32) ArgumentOrigin(name='y')
         # Name: SequenceType([TileIndexType(0), TileIndexType(1)]) SourceOrigin(location=<SourceLocation all_ast_nodes.py:145>)
         out[tile] = x[tile] + y[tile]
-    return out""",
+    return out
+
+def device_ir():
+    # No stacktrace found for following nodes
+    x: "i32[s17, s27]" = helion__compiler_tracing_ops__host_tensor('x')
+    block_size0: "Sym(u21)" = helion__compiler_tracing_ops__get_symnode('block_size0')
+    block_size1: "Sym(u22)" = helion__compiler_tracing_ops__get_symnode('block_size1')
+    load: "i32[u21, u22]" = helion_language_memory_ops_load(x, [block_size0, block_size1]);  x = None
+    y: "i32[s17, s27]" = helion__compiler_tracing_ops__host_tensor('y')
+    load_1: "i32[u21, u22]" = helion_language_memory_ops_load(y, [block_size0, block_size1]);  y = None
+    add: "i32[u21, u22]" = torch.ops.aten.add.Tensor(load, load_1);  load = load_1 = None
+    out: "i32[s17, s27]" = helion__compiler_tracing_ops__host_tensor('out')
+    store = helion_language_memory_ops_store(out, [block_size0, block_size1], add);  out = block_size0 = block_size1 = add = store = None
+    return None""",
         )
 
     def test_hl_zeros_usage(self):
@@ -580,7 +621,21 @@ def hl_zeros_usage(x: torch.Tensor):
         # Name: SequenceType([TileIndexType(0), TileIndexType(1)]) SourceOrigin(location=<SourceLocation basic_kernels.py:26>)
         # Name: TensorType([block_size0, block_size1], torch.int32) DeviceOrigin(location=<SourceLocation basic_kernels.py:29>)
         out[tile] = tmp
-    return out""",
+    return out
+
+def device_ir():
+    # No stacktrace found for following nodes
+    block_size0: "Sym(u0)" = helion__compiler_tracing_ops__get_symnode('block_size0')
+    block_size1: "Sym(u1)" = helion__compiler_tracing_ops__get_symnode('block_size1')
+    full: "i32[u0, u1]" = helion_language_creation_ops_full([block_size0, block_size1], 0, torch.int32)
+    x: "i32[s77, s27]" = helion__compiler_tracing_ops__host_tensor('x')
+    load: "i32[u0, u1]" = helion_language_memory_ops_load(x, [block_size0, block_size1])
+    add: "i32[u0, u1]" = torch.ops.aten.add.Tensor(full, load);  full = load = None
+    load_1: "i32[u0, u1]" = helion_language_memory_ops_load(x, [block_size0, block_size1]);  x = None
+    add_1: "i32[u0, u1]" = torch.ops.aten.add.Tensor(add, load_1);  add = load_1 = None
+    out: "i32[s77, s27]" = helion__compiler_tracing_ops__host_tensor('out')
+    store = helion_language_memory_ops_store(out, [block_size0, block_size1], add_1);  out = block_size0 = block_size1 = add_1 = store = None
+    return None""",
         )
 
     def test_hl_full_usage(self):
@@ -606,7 +661,7 @@ def hl_full_usage(x: torch.Tensor):
     # Name: TensorType([x_size0, x_size1], torch.int32) SourceOrigin(location=<SourceLocation basic_kernels.py:36>)
     for tile in hl.tile(out.size()):
         # Call: TensorType([block_size0, block_size1], torch.int32) DeviceOrigin(location=<SourceLocation basic_kernels.py:38>)
-        # Attribute: CallableType(helion::full) AttributeOrigin(value=GlobalOrigin(name='hl'), key='full')
+        # Attribute: CallableType(full) AttributeOrigin(value=GlobalOrigin(name='hl'), key='full')
         # Name: PythonModuleType(helion.language) GlobalOrigin(name='hl')
         # Name: SequenceType([TileIndexType(0), TileIndexType(1)]) SourceOrigin(location=<SourceLocation basic_kernels.py:37>)
         # Constant: LiteralType(1) DeviceOrigin(location=<SourceLocation basic_kernels.py:38>)
@@ -626,7 +681,21 @@ def hl_full_usage(x: torch.Tensor):
         # Name: SequenceType([TileIndexType(0), TileIndexType(1)]) SourceOrigin(location=<SourceLocation basic_kernels.py:37>)
         # Name: TensorType([block_size0, block_size1], torch.int32) DeviceOrigin(location=<SourceLocation basic_kernels.py:40>)
         out[tile] = tmp
-    return out""",
+    return out
+
+def device_ir():
+    # No stacktrace found for following nodes
+    block_size0: "Sym(u0)" = helion__compiler_tracing_ops__get_symnode('block_size0')
+    block_size1: "Sym(u1)" = helion__compiler_tracing_ops__get_symnode('block_size1')
+    full: "i32[u0, u1]" = helion_language_creation_ops_full([block_size0, block_size1], 1, torch.int32)
+    x: "i32[s77, s27]" = helion__compiler_tracing_ops__host_tensor('x')
+    load: "i32[u0, u1]" = helion_language_memory_ops_load(x, [block_size0, block_size1])
+    add: "i32[u0, u1]" = torch.ops.aten.add.Tensor(full, load);  full = load = None
+    load_1: "i32[u0, u1]" = helion_language_memory_ops_load(x, [block_size0, block_size1]);  x = None
+    add_1: "i32[u0, u1]" = torch.ops.aten.add.Tensor(add, load_1);  add = load_1 = None
+    out: "i32[s77, s27]" = helion__compiler_tracing_ops__host_tensor('out')
+    store = helion_language_memory_ops_store(out, [block_size0, block_size1], add_1);  out = block_size0 = block_size1 = add_1 = store = None
+    return None""",
         )
 
 

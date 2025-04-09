@@ -45,6 +45,7 @@ class SymbolOrigin(NamedTuple):
 class HostFunction:
     def __init__(self, fn: types.FunctionType, fake_args: list[object]) -> None:
         super().__init__()
+        env = CompileEnvironment.current()
         self.fn = fn
         self.location: SourceLocation = UnknownLocation()
         self.local_types: dict[str, TypeInfo] | None = None
@@ -65,10 +66,14 @@ class HostFunction:
             self.args: ast.arguments = root.args
             self.body: list[ast.stmt] = root.body
 
+            from .device_ir import lower_to_device_ir
             from .type_propagation import propagate_types
 
             propagate_types(self, fake_args)
-            CompileEnvironment.current().finalize_config_spec()
+            env.errors.raise_if_errors()
+            env.finalize_config_spec()
+            self.device_ir = lower_to_device_ir(self)
+
             # TODO(jansel): assert we don't have any extra decorators
             # TODO(jansel): check type annotations for hl.constexpr/hl.specialize
 
@@ -91,14 +96,17 @@ class HostFunction:
         return pexpr(expr.xreplace(replacements))
 
     def debug_types(self) -> str:
-        ast_str = print_ast(
-            self.location.to_ast(
-                ast.FunctionDef(self.name, self.args, self.body, [], None)
-            )
-        )
+        result = [
+            print_ast(
+                self.location.to_ast(
+                    ast.FunctionDef(self.name, self.args, self.body, [], None)
+                )
+            ),
+            str(self.device_ir),
+        ]
         if error_str := CompileEnvironment.current().errors.report(strip_paths=True):
-            return f"{ast_str}\n\n{error_str}"
-        return ast_str
+            result.extend(error_str)
+        return "\n\n".join(result)
 
     def codegen_function_def(self, statements: list[ast.AST]) -> ast.FunctionDef:
         return ast_extension.create(

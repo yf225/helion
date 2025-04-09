@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import functools
 import inspect
-from types import FunctionType
 from typing import TYPE_CHECKING
 from typing import Callable
 from typing import Generic
@@ -13,12 +13,18 @@ from typing import TypeVar
 from typing import cast
 
 import torch
+from torch.fx.experimental import proxy_tensor
+from torch.utils._pytree import tree_map_only
+
+from helion import exc
+from helion._compiler.compile_environment import CompileEnvironment
 
 if TYPE_CHECKING:
     import ast
 
-    from helion._compiler.generate_ast import CodegenState
+    from helion._compiler.inductor_lowering import CodegenState
     from helion._compiler.type_propagation import TypeInfo
+    from helion._compiler.variable_origin import Origin
 
     _T = TypeVar("_T")
     _C = TypeVar("_C", bound=Callable[..., object])
@@ -39,7 +45,7 @@ class APIFunc(Protocol):
     _tiles_as_sizes: bool
     _type_function: Callable[..., TypeInfo] | None
     _codegen: Callable[[CodegenState], ast.AST] | None
-    _register_fake: Callable[..., None] | None
+    _fake_fn: Callable[..., object] | None
     _signature: inspect.Signature
 
     def __call__(self, *args: object, **kwargs: object) -> object: ...
@@ -68,7 +74,7 @@ def api(
         api._tiles_as_sizes = tiles_as_sizes
         api._type_function = None
         api._codegen = None
-        api._register_fake = None
+        api._fake_fn = None
         api._signature = signature or inspect.signature(
             cast("Callable[..., object]", fn)
         )
@@ -83,9 +89,6 @@ def type_propagation(
     def _impl(type_fn: Callable[..., TypeInfo]) -> Callable[..., Never]:
         assert is_api_func(original_fn), (
             f"{type_propagation.__qualname__} can only be used on API functions"
-        )
-        assert original_fn._type_function is None, (
-            "type_prop can only be used once per function"
         )
         original_fn._type_function = type_fn
         return _no_call
@@ -109,14 +112,54 @@ def codegen(
     return _impl
 
 
-def api_custom_op(**kwargs: bool) -> _Decorator:
+def api_custom_op(*, tiles_as_sizes: bool = False, **kwargs: bool) -> _Decorator:
     def _impl(fn: _C) -> _C:
-        assert isinstance(fn, FunctionType)
-        op_def = torch.library.custom_op(f"helion::{fn.__name__}", mutates_args=())(fn)
-        overload = api(**kwargs, signature=inspect.signature(fn))(op_def._opoverload)
-        assert is_api_func(overload)
-        overload._register_fake = op_def.register_fake
-        return overload
+        # pyre-fixme[6]
+        @api(**kwargs, tiles_as_sizes=tiles_as_sizes, signature=inspect.signature(fn))
+        @functools.wraps(fn)
+        def wrapper(*args: object, **kwargs: object) -> object:
+            """
+            We hit type errors if we use the regular overload, here we
+            intercept the call and fake the custom op.
+            """
+            from helion._compiler.tile_index_proxy import TileIndexProxy
+
+            mode = proxy_tensor.get_proxy_mode()
+            if mode is None:
+                if CompileEnvironment.has_current():
+                    if tiles_as_sizes:
+                        args, kwargs = TileIndexProxy.tiles_to_sizes((args, kwargs))
+                    return wrapper._fake_fn(*args, **kwargs)
+                return fn(*args, **kwargs)
+            assert isinstance(mode, proxy_tensor.ProxyTorchDispatchMode)
+            tracer = mode.tracer
+            with proxy_tensor.disable_proxy_modes_tracing():
+                if tiles_as_sizes:
+                    args, kwargs = TileIndexProxy.tiles_to_sizes((args, kwargs))
+                proxy_args, proxy_kwargs = tree_map_only(
+                    proxy_tensor._ProxyTensor,
+                    lambda x: x.proxy,
+                    tree_map_only(
+                        (torch.Tensor, torch.SymInt, torch.SymBool, torch.SymFloat),
+                        functools.partial(proxy_tensor.get_proxy_slot, tracer=tracer),
+                        (args, kwargs),
+                    ),
+                )
+                proxy_out = tracer.create_proxy(
+                    "call_function",
+                    wrapper,
+                    proxy_args,
+                    proxy_kwargs,
+                )
+                assert wrapper._fake_fn is not None
+                out = wrapper._fake_fn(*args, **kwargs)
+                if out is not None:
+                    proxy_tensor.track_tensor_tree(
+                        out, proxy_out, constant=None, tracer=tracer
+                    )
+            return out
+
+        return wrapper
 
     return _impl
 
@@ -128,8 +171,36 @@ def register_fake(
         assert is_api_func(original_fn), (
             f"{register_fake.__qualname__} can only be used on API functions"
         )
-        assert original_fn._register_fake is not None
-        original_fn._register_fake(fake_fn)
+        assert original_fn._fake_fn is None
+        original_fn._fake_fn = fake_fn
+        if original_fn._type_function is None:
+            original_fn._type_function = _default_type_function(
+                fake_fn, original_fn._tiles_as_sizes
+            )
         return _no_call
 
     return _impl
+
+
+def _default_type_function(
+    fake_fn: Callable[..., object], tiles_as_sizes: bool
+) -> Callable[..., TypeInfo]:
+    from .._compiler.tile_index_proxy import TileIndexProxy
+    from .._compiler.type_propagation import TypeInfo
+
+    def type_prop_with_fake_fn(
+        *args: object, origin: Origin, **kwargs: object
+    ) -> TypeInfo:
+        args, kwargs = tree_map_only(TypeInfo, _to_proxy, (args, kwargs))
+        if tiles_as_sizes:
+            args, kwargs = TileIndexProxy.tiles_to_sizes((args, kwargs))
+        return TypeInfo.from_example(fake_fn(*args, **kwargs), origin)
+
+    return type_prop_with_fake_fn
+
+
+def _to_proxy(arg: TypeInfo) -> object:
+    try:
+        return arg.proxy()
+    except NotImplementedError:
+        raise exc.TracedArgNotSupported(arg) from None

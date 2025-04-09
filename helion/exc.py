@@ -81,6 +81,16 @@ class InvalidAssignment(NotAllowedOnDevice):
     message = "Assignment target must be Name or Subscript inside the `hl.tile` or `hl.grid` loop."
 
 
+class InvalidSliceType(BaseError):
+    message = "Tensor subscript with invalid slice type {0!s}."
+
+
+class CantReadTypeFromHost(BaseError):
+    message = (
+        "Loading {0!s} from host is not allowed inside the `hl.tile` or `hl.grid` loop."
+    )
+
+
 class NonTensorSubscriptAssign(BaseError):
     message = "Expected tensor in subscript assignment, got {0!s} and {1!s}."
 

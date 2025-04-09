@@ -145,6 +145,9 @@ class CompileEnvironment:
         """tl.int32 or tl.int64 depending on Settings()"""
         return triton_type(self.settings.index_dtype)
 
+    def sympy_debug(self, expr: sympy.Expr) -> str:
+        return str(expr.xreplace(self.debug_shape_renames))
+
     def __enter__(self) -> Self:
         assert getattr(tls, "env", None) is None, "CompileEnvironment already active"
         self.fake_mode.__enter__()
@@ -170,6 +173,14 @@ class CompileEnvironment:
         except AttributeError:
             pass
         raise NoCurrentEnvironment from None
+
+    @staticmethod
+    def has_current() -> bool:
+        try:
+            CompileEnvironment.current()
+            return True
+        except NoCurrentEnvironment:
+            return False
 
 
 class NoCurrentEnvironment(RuntimeError):

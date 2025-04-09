@@ -10,6 +10,7 @@ import torch
 from .. import exc
 from .._compiler.ast_extension import ExtendedAST
 from .._compiler.ast_extension import LoopType
+from .._compiler.ast_extension import expr_from_string
 from .._compiler.type_propagation import IterType
 from .._compiler.type_propagation import Origin
 from .._compiler.type_propagation import SequenceType
@@ -21,8 +22,7 @@ from . import _decorators
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from helion._compiler.generate_ast import CodegenState
-
+    from .._compiler.inductor_lowering import CodegenState
 
 __all__ = ["TileIndexProtocol", "tile"]
 
@@ -74,7 +74,7 @@ def tile(sizes: int | Sequence[int]) -> TileIndexProtocol | Sequence[TileIndexPr
 
 
 @_decorators.type_propagation(tile)
-def _tile_type_prop(sizes: TypeInfo, *, origin: Origin) -> TypeInfo:
+def _(sizes: TypeInfo, *, origin: Origin) -> TypeInfo:
     try:
         proxy_sizes = sizes.proxy()
         if not (
@@ -101,12 +101,11 @@ def _tile_type_prop(sizes: TypeInfo, *, origin: Origin) -> TypeInfo:
 
 
 @_decorators.codegen(tile)
-def _tile_codegen(state: CodegenState) -> ast.AST:
+def _(state: CodegenState) -> ast.AST:
     for_loop = ExtendedAST.current()[-2]
     loop_type = for_loop._loop_type
-    type_info = state.type_info
+    type_info = ExtendedAST.current()[-1]._type_info
     assert isinstance(for_loop, ast.For)
-    assert for_loop.iter is state.ast_node
     assert isinstance(type_info, IterType)
     if isinstance(type_info.inner, SequenceType):
         tile_indices = type_info.inner.unpack()
@@ -118,7 +117,7 @@ def _tile_codegen(state: CodegenState) -> ast.AST:
         state.tile_strategy.codegen_grid(
             state, [t.block_size_idx for t in tile_indices]
         )
-        return state.ast_node
+        return expr_from_string("None")
     if loop_type == LoopType.DEVICE:
         raise NotImplementedError("TODO: implement tile() for device loops")
     raise AssertionError(f"Expected loop type: {loop_type}")

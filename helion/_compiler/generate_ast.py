@@ -2,39 +2,25 @@ from __future__ import annotations
 
 import ast
 import contextlib
-import functools
 from typing import TYPE_CHECKING
-from typing import Callable
 from typing import NamedTuple
 
-from .. import exc
-from ..language._decorators import APIFunc
 from ..language._decorators import is_api_func
 from .ast_extension import ExtendedAST
 from .ast_extension import LoopType
+from .ast_extension import NodeVisitor
 from .ast_extension import create
-from .ast_extension import expr_from_string
 from .ast_extension import statement_from_string
 from .compile_environment import CompileEnvironment
 from .device_function import DeviceFunction
 from .inductor_lowering import codegen_call_with_graph
-from .type_propagation import CallableType
-from .type_propagation import LiteralType
-from .type_propagation import SequenceType
-from .type_propagation import SymIntType
-from .type_propagation import TensorType
-from .type_propagation import TileIndexType
-from .type_propagation import TypeInfo
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    import torch
-
     from ..runtime import Config
     from .host_function import HostFunction
-    from .tile_strategy import TileStrategy
-
+    from .type_propagation import TensorType
 
 OUTPUT_CODE_HEADER = """\
 import torch
@@ -45,60 +31,10 @@ from torch._inductor.runtime.triton_helpers import math as tl_math
 """
 
 
-class CodegenState(NamedTuple):
-    codegen: GenerateAST
-    type_info: TypeInfo | None = None
-    ast_node: ast.AST | None = None
-    fx_node: torch.fx.Node | None = None
-    proxy_args: list[object] | None = None
-
-    def proxy_arg(self, i: int) -> object:
-        assert self.proxy_args is not None
-        return self.proxy_args[i]
-
-    @property
-    def fake_value(self) -> object:
-        if self.fx_node is not None:
-            return self.fx_node.meta["val"]
-        assert self.type_info is not None
-        return self.type_info.proxy()
-
-    @property
-    def device_function(self) -> DeviceFunction:
-        return self.codegen.device_function
-
-    @property
-    def tile_strategy(self) -> TileStrategy:
-        return self.codegen.device_function.tile_strategy
-
-    @property
-    def config(self) -> Config:
-        return self.codegen.device_function.config
-
-    def add_statement(self, statement: ast.stmt | str) -> None:
-        return self.codegen.add_statement(statement)
-
-
-def device_only(
-    fn: Callable[..., ast.AST],
-) -> Callable[..., ast.AST]:
-    @functools.wraps(fn)
-    def wrapper(self: GenerateAST, node: ast.AST) -> ast.AST:
-        if not self.on_device:
-            return self.generic_visit(node)
-        return fn(self, node)
-
-    return wrapper
-
-
-@device_only
-def _not_supported_on_device(self: GenerateAST, node: ast.AST) -> ast.AST:
-    raise exc.NotAllowedOnDevice(type(node).__name__)
-
-
-class GenerateAST(ast.NodeVisitor):
+class GenerateAST(NodeVisitor):
     def __init__(self, func: HostFunction, config: Config) -> None:
         super().__init__()
+        self.host_fn = func
         self.host_statements: list[ast.AST] = []
         self.statements_stack: list[list[ast.AST]] = [self.host_statements]
         self.on_device = False
@@ -144,21 +80,6 @@ class GenerateAST(ast.NodeVisitor):
             self.on_device = False
             self.host_statements = prior
 
-    def visit(self, node: ast.AST) -> ast.AST:
-        assert isinstance(node, ExtendedAST)
-        with node:
-            try:
-                visitor = getattr(
-                    self,
-                    f"visit_{node.__class__.__name__}",
-                    self.generic_visit,
-                )
-                return visitor(node)
-            except exc.Base:
-                raise
-            except Exception as e:
-                raise exc.InternalError(e) from e
-
     def generic_visit(self, node: ast.AST) -> ast.AST:
         assert isinstance(node, ExtendedAST)
         fields = {}
@@ -184,240 +105,35 @@ class GenerateAST(ast.NodeVisitor):
             assert not node.orelse
             with (
                 self.set_on_device(),
-                self.set_statements(st := self.device_function.body),
+                self.set_statements(self.device_function.body),
             ):
-                self.visit(node.iter)
-                for stmt in node.body:
-                    st.append(self.visit(stmt))
+                iter_node = node.iter
+                assert isinstance(iter_node, ExtendedAST)
+                with iter_node:
+                    assert isinstance(iter_node, ast.Call)
+                    assert not iter_node.keywords
+                    assert len(iter_node.args) == 1
+                    fn_node = iter_node.func
+                    assert isinstance(fn_node, ExtendedAST)
+                    arg_node = iter_node.args[0]
+                    assert isinstance(arg_node, ExtendedAST)
+                    fn = fn_node._type_info.proxy()
+                    arg = arg_node._type_info.proxy()
+                    assert is_api_func(fn)
+                    assert fn._codegen is not None
+                    from .inductor_lowering import CodegenState
+
+                    fn._codegen(
+                        CodegenState(
+                            self,
+                            fx_node=None,
+                            proxy_args=[arg],
+                            ast_args=None,
+                        ),
+                    )
+                codegen_call_with_graph(self, self.host_fn.device_ir.root, [])
             return self.device_function.codegen_function_call()
         return self.generic_visit(node)
-
-    def visit_Call(self, node: ast.Call) -> ast.AST:
-        assert isinstance(node.func, ExtendedAST)
-        if isinstance(fn_type := node.func._type_info, CallableType):
-            if is_api_func(api := fn_type.value) and api._codegen is not None:
-                return api._codegen(
-                    CodegenState(
-                        self,
-                        ast_node=node,
-                        type_info=node._type_info,
-                        proxy_args=self._get_proxy_args(api, node),
-                    )
-                )
-            if self.on_device and node._graph is not None:
-                tensor_args: list[ast.AST] = []
-                for arg in node.args:
-                    if isinstance(arg, ast.Starred):
-                        with arg:
-                            raise exc.StarredArgsNotSupportedOnDevice
-                    arg_ast = self.visit(arg)
-                    if arg._type_info.contains_tensor():
-                        assert isinstance(arg._type_info, TensorType), (
-                            "TODO: tensor in collection"
-                        )
-                        tensor_args.append(self.lift(arg_ast))
-                for kwarg in node.keywords:
-                    if kwarg.arg is None:
-                        with kwarg.value:
-                            raise exc.StarredArgsNotSupportedOnDevice
-                    arg = kwarg.value
-                    arg_ast = self.visit(arg)
-                    if arg._type_info.contains_tensor():
-                        assert isinstance(arg._type_info, TensorType), (
-                            "TODO: tensor in collection"
-                        )
-                        tensor_args.append(self.lift(arg_ast))
-                return codegen_call_with_graph(self, node._graph, tensor_args)
-        return self.generic_visit(node)
-
-    def _get_proxy_args(self, api: APIFunc, node: ast.Call) -> list[object] | None:
-        args = []
-        kwargs = {}
-        try:
-            for arg in node.args:
-                assert isinstance(arg, ExtendedAST)
-                if isinstance(arg, ast.Starred):
-                    with arg:
-                        raise exc.StarredArgsNotSupportedOnDevice
-                args.append(arg._type_info.proxy())
-            for kwarg in node.keywords:
-                assert isinstance(kwarg.value, ExtendedAST)
-                if kwarg.arg is None:
-                    with kwarg.value:
-                        raise exc.StarredArgsNotSupportedOnDevice
-                kwargs[kwarg.arg] = kwarg.value._type_info.proxy()
-        except NotImplementedError:
-            return None
-        bound = api._signature.bind(*args, **kwargs)
-        bound.apply_defaults()
-        return [*bound.arguments.values()]
-
-    @device_only
-    def visit_Name(self, node: ast.Name) -> ast.AST:
-        assert isinstance(node, ExtendedAST)
-        type_info = node._type_info
-        if (
-            self.on_device
-            and isinstance(node.ctx, ast.Load)
-            and type_info.origin.is_host()
-        ):
-            if isinstance(type_info, TensorType):
-                return self.tensor_reference(node).node
-        return self.generic_visit(node)
-
-    visit_AnnAssign = _not_supported_on_device
-
-    @device_only
-    def visit_Assign(self, node: ast.Assign) -> ast.AST:
-        if len(node.targets) != 1:
-            raise exc.AssignmentMultipleTargets
-        (target,) = node.targets
-        if isinstance(target, ast.Name):
-            # TODO(jansel): should assert that name is only used on device
-            return self.generic_visit(node)
-        if not isinstance(target, ast.Subscript):
-            raise exc.InvalidAssignment
-        assert isinstance(node.value, ExtendedAST)
-        rhs_type = node.value._type_info
-        assert isinstance(target, ExtendedAST)
-        lhs_type = target._type_info
-        if not isinstance(lhs_type, TensorType) or not isinstance(rhs_type, TensorType):
-            raise exc.NonTensorSubscriptAssign(lhs_type, rhs_type)
-        if rhs_type.fake_value.size() != lhs_type.fake_value.size():
-            raise exc.ShapeMismatch(lhs_type, rhs_type)
-        value = self.visit(node.value)
-        indexing = self.subscript_indexing(target)
-        return statement_from_string(
-            "tl.store(name + offset, value, mask)",
-            value=self.lift(value),
-            name=indexing.tensor_ref.node,
-            offset=indexing.index_expr,
-            mask=indexing.mask_expr,
-        )
-
-    @device_only
-    def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
-        value = node.value
-        assert isinstance(value, ExtendedAST)
-        if not isinstance(value._type_info, TensorType):
-            raise exc.ExpectedTensorName(value._type_info)
-        # TODO(jansel): non tensor types?
-        # TODO(jansel): de-duplicate redundant loads
-
-        if value._type_info.origin.is_host():
-            indexing = self.subscript_indexing(node)
-            extra = ", other=0" if indexing.has_mask() else ""
-            return self.lift(
-                expr_from_string(
-                    # TODO(jansel): optimize away mask/other?
-                    f"tl.load(name + offset, mask{extra})",
-                    name=indexing.tensor_ref.node,
-                    offset=indexing.index_expr,
-                    mask=indexing.mask_expr,
-                )
-            )
-        items = self.slice_type_infos(node)
-        output_keys = []
-        for item in items:
-            if not item.is_literal():
-                raise exc.InvalidIndexingType(item)
-            val = item.as_literal()
-            if val is None:
-                output_keys.append("None")
-            elif isinstance(val, slice) and repr(val) == "slice(None, None, None)":
-                output_keys.append(":")
-            else:
-                raise exc.InvalidIndexingType(repr(val))
-        return expr_from_string(
-            f"base[{', '.join(output_keys)}]",
-            base=self.lift(self.visit(node.value)),
-        )
-
-    def slice_type_infos(self, node: ast.Subscript) -> list[TypeInfo]:
-        slice_node = node.slice
-        assert isinstance(slice_node, ExtendedAST)
-        key = slice_node._type_info
-        if isinstance(key, SequenceType):
-            keys = key.unpack()
-        else:
-            keys = [key]
-        return keys
-
-    def subscript_indexing(self, node: ast.Subscript) -> SubscriptIndexing:
-        assert isinstance(node, ExtendedAST)
-        assert isinstance(node.value, ExtendedAST)
-        with node.value:
-            tensor_ref = self.tensor_reference(node.value)
-        keys = self.slice_type_infos(node)
-        output_size = [*node._type_info.proxy().size()]
-        output_idx = 0
-        index_values = []
-        mask_values = {}
-        dtype = CompileEnvironment.current().triton_index_type()
-        for k in keys:
-            if isinstance(k, TileIndexType):
-                index = self.device_function.tile_strategy.index_var(k.block_size_idx)
-                expand = self.device_function.tile_strategy.expand_str(
-                    output_size, output_idx
-                )
-                index_values.append(f"({index}){expand}")
-                if mask := self.device_function.tile_strategy.mask_var(
-                    k.block_size_idx
-                ):
-                    mask_values.setdefault(f"({mask}){expand}")
-                output_idx += 1
-            elif isinstance(k, LiteralType):
-                val = k.as_literal()
-                if val is None:
-                    output_idx += 1
-                elif isinstance(val, int):
-                    expand = self.device_function.tile_strategy.expand_str(
-                        output_size, output_idx
-                    )
-                    index_values.append(f"tl.full([1], {val!r}, {dtype}){expand}")
-            elif isinstance(k, SymIntType):
-                expand = self.device_function.tile_strategy.expand_str(
-                    output_size, output_idx
-                )
-                val = self.device_function.sympy_expr(k.to_sympy())
-                index_values.append(f"tl.full([1], {val}, {dtype}){expand}")
-            else:
-                raise exc.InvalidIndexingType(k)
-        assert len(output_size) == output_idx
-
-        fake_value = tensor_ref.type_info.fake_value
-        if len(index_values) != fake_value.ndim:
-            raise exc.RankMismatch(fake_value.ndim, len(index_values))
-        index_expr = []
-        for i, idx in enumerate(index_values):
-            if fake_value.size(i) != 1:
-                stride = self.device_function.tensor_stride(fake_value, i).name
-                index_expr.append(f"{idx} * {stride}")
-        if not index_expr:
-            shape_str = self.device_function.tile_strategy.shape_str(output_size)
-            index_expr.append(f"tl.zeros({shape_str}, {dtype})")
-
-        return SubscriptIndexing(
-            tensor_ref,
-            expr_from_string("+".join(index_expr)),
-            expr_from_string("|".join(mask_values) or "None"),
-        )
-
-    def tensor_reference(self, node: ast.AST) -> TensorReference:
-        assert isinstance(node, ExtendedAST)
-        if not isinstance(node, ast.Name):
-            raise exc.ExpectedTensorName(type(node).__name__)
-        if not isinstance(type_info := node._type_info, TensorType):
-            raise exc.ExpectedTensorName(node._type_info)
-        if node._type_info.origin.is_host():
-            name = self.device_function.tensor_arg(
-                type_info.fake_value, prefer_name=node.id
-            ).name
-        else:
-            name = node.id
-        return TensorReference(
-            create(ast.Name, id=name, ctx=ast.Load()), name, node._type_info
-        )
 
 
 class TensorReference(NamedTuple):

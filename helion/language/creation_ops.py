@@ -13,7 +13,7 @@ from . import _decorators
 if TYPE_CHECKING:
     import ast
 
-    from .._compiler.generate_ast import CodegenState
+    from .._compiler.inductor_lowering import CodegenState
 
 __all__ = ["full", "zeros"]
 
@@ -69,13 +69,3 @@ def _full_codegen(state: CodegenState) -> ast.AST:
     type_str = triton_type(fake_value.dtype)
     value_str = state.device_function.literal_expr(state.proxy_arg(1))
     return expr_from_string(f"tl.full({shape_str}, {value_str}, {type_str})")
-
-
-@_decorators.api_custom_op()
-def _symnode_dummy_origin() -> int:
-    raise AssertionError("this should never be called")
-
-
-@_decorators.codegen(_symnode_dummy_origin)
-def _(state: CodegenState) -> ast.AST:
-    return expr_from_string("'symnode_dummy_origin'")  # should never be used
