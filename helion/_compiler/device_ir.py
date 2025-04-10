@@ -10,6 +10,7 @@ import torch
 from torch._dynamo.convert_frame import compile_lock
 from torch._inductor.decomposition import select_decomp_table
 from torch.fx.experimental import proxy_tensor
+from torch.fx.traceback import preserve_node_meta
 
 from .. import exc
 from .. import language as hl
@@ -20,6 +21,7 @@ from .ast_extension import create
 from .compile_environment import CompileEnvironment
 from .host_function import HostFunction
 from .inductor_lowering import prepare_graph_lowerings
+from .source_location import current_location
 from .tracing_ops import _get_symnode
 from .tracing_ops import _host_tensor
 from .type_propagation import IterType
@@ -73,7 +75,16 @@ def _make_fx(fn: Callable[..., object], *args: object) -> torch.fx.GraphModule:
         return get_proxy_slot(obj, tracer, default, transform)
 
     get_proxy_slot: Callable[..., object] = proxy_tensor.get_proxy_slot
-    with patch.object(proxy_tensor, "get_proxy_slot", _get_proxy_slot):
+    with (
+        preserve_node_meta(),
+        patch.object(proxy_tensor, "get_proxy_slot", _get_proxy_slot),
+        patch.object(
+            torch.fx.proxy,
+            "_COPY_META_FIELDS",
+            [*torch.fx.proxy._COPY_META_FIELDS, "location"],
+        ),
+    ):
+        current_location().set_fx_location()
         return proxy_tensor.make_fx(fn, decomposition_table=select_decomp_table())(
             *args
         )
@@ -91,6 +102,10 @@ class DeviceIR:
         return textwrap.dedent(
             re.sub("^[^\n]+\n", "", output).replace("forward(self)", "device_ir()")
         )
+
+    def debug_str(self) -> str:
+        result = str(self)
+        return re.sub(r"(# File:\s+).*/([^/:]+:\d+)", r"\1.../\2", result)
 
     def add_graph(self, graph: torch.fx.GraphModule) -> None:
         self.graphs.append(graph)

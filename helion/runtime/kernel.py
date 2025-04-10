@@ -133,9 +133,9 @@ class BoundKernel:
         module = PyCodeCache.load(self.to_triton_code(config))
         return getattr(module, self.kernel.name)
 
-    def _debug_types(self) -> str:
+    def _debug_str(self) -> str:
         with self.env:
-            return self.host_fn.debug_types()
+            return self.host_fn.debug_str()
 
     def __call__(self, *args: object) -> object:
         raise NotImplementedError

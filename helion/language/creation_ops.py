@@ -29,7 +29,7 @@ def zeros(shape: list[int], dtype: torch.dtype = torch.float32) -> torch.Tensor:
     return full(shape, 0.0 if dtype.is_floating_point else 0, dtype=dtype)
 
 
-@_decorators.api_custom_op(tiles_as_sizes=True)
+@_decorators.api(tiles_as_sizes=True)
 def full(
     shape: list[int], value: float, dtype: torch.dtype = torch.float32
 ) -> torch.Tensor:

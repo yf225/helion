@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 __all__ = ["load", "store"]
 
 
-@_decorators.api_custom_op(tiles_as_sizes=True)
+@_decorators.api(tiles_as_sizes=True)
 def store(tensor: torch.Tensor, index: list[object], value: torch.Tensor) -> None:
     raise exc.NotInsideKernel
 
@@ -47,7 +47,7 @@ def _(state: CodegenState) -> ast.AST:
     )
 
 
-@_decorators.api_custom_op(tiles_as_sizes=True)
+@_decorators.api(tiles_as_sizes=True)
 def load(tensor: torch.Tensor, index: list[object]) -> torch.Tensor:
     raise exc.NotInsideKernel
 

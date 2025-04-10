@@ -8,6 +8,9 @@ from typing import TYPE_CHECKING
 from typing import Protocol
 from typing import TypeVar
 
+from torch.fx.traceback import get_current_meta
+from torch.fx.traceback import has_preserved_node_meta
+
 if TYPE_CHECKING:
     import ast
     from typing_extensions import Self
@@ -113,9 +116,21 @@ class SourceLocation(traceback.FrameSummary):
             tls.locations.append(self)
         except AttributeError:
             tls.locations = [self]
+        self.set_fx_location()
 
     def __exit__(self, *args: object) -> None:
-        tls.locations.pop()
+        locations = tls.locations
+        locations.pop()
+        if locations:
+            locations[-1].set_fx_location()
+        else:
+            UnknownLocation().set_fx_location()
+
+    def set_fx_location(self) -> None:
+        if has_preserved_node_meta():
+            meta = get_current_meta()
+            meta["location"] = self
+            meta["stack_trace"] = self.format()
 
 
 class UnknownLocation(SourceLocation):
@@ -133,6 +148,12 @@ class UnknownLocation(SourceLocation):
 
     def __bool__(self) -> bool:
         return False
+
+    def set_fx_location(self) -> None:
+        if has_preserved_node_meta():
+            meta = get_current_meta()
+            meta.pop("location", None)
+            meta.pop("stack_trace", None)
 
 
 def current_location() -> SourceLocation:

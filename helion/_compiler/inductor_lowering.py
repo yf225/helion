@@ -227,7 +227,7 @@ class GraphInterpreter(Interpreter):
 
     def run_node(self, n: Node) -> object:
         if n.op == "call_function":
-            with self._set_current_node(n):
+            with self._set_current_node(n), n.meta["location"]:
                 lowering: Lowering = n.meta["lowering"]
                 result = lowering.codegen(self, n)
                 if not isinstance(result, ast.AST):

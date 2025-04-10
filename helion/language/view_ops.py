@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from .._compiler.inductor_lowering import CodegenState
 
 
-@_decorators.api_custom_op(tiles_as_sizes=True)
+@_decorators.api(tiles_as_sizes=True)
 def subscript(tensor: torch.Tensor, index: list[object]) -> torch.Tensor:
     """
     Equivalent to tensor[index] where tensor is a kernel-tensor (not a host-tensor).

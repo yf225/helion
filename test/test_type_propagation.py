@@ -17,7 +17,7 @@ basic_kernels = import_path(datadir / "basic_kernels.py")
 
 
 def type_propagation_report(fn: Kernel, *args, ignore=False):
-    return fn.bind(args)._debug_types()
+    return fn.bind(args)._debug_str()
 
 
 class TestTypePropagation(TestCase):
@@ -66,14 +66,20 @@ def add(x, y):
     return out
 
 def device_ir():
-    # No stacktrace found for following nodes
+     # File: .../basic_kernels.py:11 in add, code: out[tile] = x[tile] + y[tile]
     x: "i32[s17, s27]" = helion__compiler_tracing_ops__host_tensor('x')
     block_size0: "Sym(u0)" = helion__compiler_tracing_ops__get_symnode('block_size0')
     block_size1: "Sym(u1)" = helion__compiler_tracing_ops__get_symnode('block_size1')
     load: "i32[u0, u1]" = helion_language_memory_ops_load(x, [block_size0, block_size1]);  x = None
+
+     # File: .../basic_kernels.py:11 in add, code: out[tile] = x[tile] + y[tile]
     y: "i32[s17, s27]" = helion__compiler_tracing_ops__host_tensor('y')
     load_1: "i32[u0, u1]" = helion_language_memory_ops_load(y, [block_size0, block_size1]);  y = None
+
+     # File: .../basic_kernels.py:11 in add, code: out[tile] = x[tile] + y[tile]
     add: "i32[u0, u1]" = torch.ops.aten.add.Tensor(load, load_1);  load = load_1 = None
+
+     # File: .../basic_kernels.py:11 in add, code: out[tile] = x[tile] + y[tile]
     out: "i32[s17, s27]" = helion__compiler_tracing_ops__host_tensor('out')
     store = helion_language_memory_ops_store(out, [block_size0, block_size1], add);  out = block_size0 = block_size1 = add = store = None
     return None""",
@@ -127,16 +133,28 @@ def torch_ops_pointwise(x, y):
     return out
 
 def device_ir():
-    # No stacktrace found for following nodes
+     # File: .../basic_kernels.py:19 in torch_ops_pointwise, code: out[tile] = torch.sigmoid(torch.add(torch.sin(x[tile]), torch.cos(y[tile])))
     x: "i32[s77]" = helion__compiler_tracing_ops__host_tensor('x')
     block_size0: "Sym(u0)" = helion__compiler_tracing_ops__get_symnode('block_size0')
     load: "i32[u0]" = helion_language_memory_ops_load(x, [block_size0]);  x = None
+
+     # File: .../basic_kernels.py:19 in torch_ops_pointwise, code: out[tile] = torch.sigmoid(torch.add(torch.sin(x[tile]), torch.cos(y[tile])))
     sin: "f32[u0]" = torch.ops.aten.sin.default(load);  load = None
+
+     # File: .../basic_kernels.py:19 in torch_ops_pointwise, code: out[tile] = torch.sigmoid(torch.add(torch.sin(x[tile]), torch.cos(y[tile])))
     y: "i32[s17]" = helion__compiler_tracing_ops__host_tensor('y')
     load_1: "i32[u0]" = helion_language_memory_ops_load(y, [block_size0]);  y = None
+
+     # File: .../basic_kernels.py:19 in torch_ops_pointwise, code: out[tile] = torch.sigmoid(torch.add(torch.sin(x[tile]), torch.cos(y[tile])))
     cos: "f32[u0]" = torch.ops.aten.cos.default(load_1);  load_1 = None
+
+     # File: .../basic_kernels.py:19 in torch_ops_pointwise, code: out[tile] = torch.sigmoid(torch.add(torch.sin(x[tile]), torch.cos(y[tile])))
     add: "f32[u0]" = torch.ops.aten.add.Tensor(sin, cos);  sin = cos = None
+
+     # File: .../basic_kernels.py:19 in torch_ops_pointwise, code: out[tile] = torch.sigmoid(torch.add(torch.sin(x[tile]), torch.cos(y[tile])))
     sigmoid: "f32[u0]" = torch.ops.aten.sigmoid.default(add);  add = None
+
+     # File: .../basic_kernels.py:19 in torch_ops_pointwise, code: out[tile] = torch.sigmoid(torch.add(torch.sin(x[tile]), torch.cos(y[tile])))
     out: "i32[s77]" = helion__compiler_tracing_ops__host_tensor('out')
     store = helion_language_memory_ops_store(out, [block_size0], sigmoid);  out = block_size0 = sigmoid = store = None
     return None""",
@@ -566,14 +584,20 @@ def all_ast_nodes(x, y):
     return out
 
 def device_ir():
-    # No stacktrace found for following nodes
+     # File: .../all_ast_nodes.py:146 in all_ast_nodes, code: out[tile] = x[tile] + y[tile]
     x: "i32[s17, s27]" = helion__compiler_tracing_ops__host_tensor('x')
     block_size0: "Sym(u21)" = helion__compiler_tracing_ops__get_symnode('block_size0')
     block_size1: "Sym(u22)" = helion__compiler_tracing_ops__get_symnode('block_size1')
     load: "i32[u21, u22]" = helion_language_memory_ops_load(x, [block_size0, block_size1]);  x = None
+
+     # File: .../all_ast_nodes.py:146 in all_ast_nodes, code: out[tile] = x[tile] + y[tile]
     y: "i32[s17, s27]" = helion__compiler_tracing_ops__host_tensor('y')
     load_1: "i32[u21, u22]" = helion_language_memory_ops_load(y, [block_size0, block_size1]);  y = None
+
+     # File: .../all_ast_nodes.py:146 in all_ast_nodes, code: out[tile] = x[tile] + y[tile]
     add: "i32[u21, u22]" = torch.ops.aten.add.Tensor(load, load_1);  load = load_1 = None
+
+     # File: .../all_ast_nodes.py:146 in all_ast_nodes, code: out[tile] = x[tile] + y[tile]
     out: "i32[s17, s27]" = helion__compiler_tracing_ops__host_tensor('out')
     store = helion_language_memory_ops_store(out, [block_size0, block_size1], add);  out = block_size0 = block_size1 = add = store = None
     return None""",
@@ -624,15 +648,25 @@ def hl_zeros_usage(x: torch.Tensor):
     return out
 
 def device_ir():
-    # No stacktrace found for following nodes
+     # File: .../basic_kernels.py:27 in hl_zeros_usage, code: tmp = hl.zeros(tile, dtype=x.dtype)
     block_size0: "Sym(u0)" = helion__compiler_tracing_ops__get_symnode('block_size0')
     block_size1: "Sym(u1)" = helion__compiler_tracing_ops__get_symnode('block_size1')
     full: "i32[u0, u1]" = helion_language_creation_ops_full([block_size0, block_size1], 0, torch.int32)
+
+     # File: .../basic_kernels.py:28 in hl_zeros_usage, code: tmp += x[tile]
     x: "i32[s77, s27]" = helion__compiler_tracing_ops__host_tensor('x')
     load: "i32[u0, u1]" = helion_language_memory_ops_load(x, [block_size0, block_size1])
+
+     # File: .../basic_kernels.py:28 in hl_zeros_usage, code: tmp += x[tile]
     add: "i32[u0, u1]" = torch.ops.aten.add.Tensor(full, load);  full = load = None
+
+     # File: .../basic_kernels.py:29 in hl_zeros_usage, code: tmp += x[tile]
     load_1: "i32[u0, u1]" = helion_language_memory_ops_load(x, [block_size0, block_size1]);  x = None
+
+     # File: .../basic_kernels.py:29 in hl_zeros_usage, code: tmp += x[tile]
     add_1: "i32[u0, u1]" = torch.ops.aten.add.Tensor(add, load_1);  add = load_1 = None
+
+     # File: .../basic_kernels.py:30 in hl_zeros_usage, code: out[tile] = tmp
     out: "i32[s77, s27]" = helion__compiler_tracing_ops__host_tensor('out')
     store = helion_language_memory_ops_store(out, [block_size0, block_size1], add_1);  out = block_size0 = block_size1 = add_1 = store = None
     return None""",
@@ -684,15 +718,25 @@ def hl_full_usage(x: torch.Tensor):
     return out
 
 def device_ir():
-    # No stacktrace found for following nodes
+     # File: .../basic_kernels.py:38 in hl_full_usage, code: tmp = hl.full(tile, 1, dtype=x.dtype)
     block_size0: "Sym(u0)" = helion__compiler_tracing_ops__get_symnode('block_size0')
     block_size1: "Sym(u1)" = helion__compiler_tracing_ops__get_symnode('block_size1')
     full: "i32[u0, u1]" = helion_language_creation_ops_full([block_size0, block_size1], 1, torch.int32)
+
+     # File: .../basic_kernels.py:39 in hl_full_usage, code: tmp += x[tile]
     x: "i32[s77, s27]" = helion__compiler_tracing_ops__host_tensor('x')
     load: "i32[u0, u1]" = helion_language_memory_ops_load(x, [block_size0, block_size1])
+
+     # File: .../basic_kernels.py:39 in hl_full_usage, code: tmp += x[tile]
     add: "i32[u0, u1]" = torch.ops.aten.add.Tensor(full, load);  full = load = None
+
+     # File: .../basic_kernels.py:40 in hl_full_usage, code: tmp += x[tile]
     load_1: "i32[u0, u1]" = helion_language_memory_ops_load(x, [block_size0, block_size1]);  x = None
+
+     # File: .../basic_kernels.py:40 in hl_full_usage, code: tmp += x[tile]
     add_1: "i32[u0, u1]" = torch.ops.aten.add.Tensor(add, load_1);  add = load_1 = None
+
+     # File: .../basic_kernels.py:41 in hl_full_usage, code: out[tile] = tmp
     out: "i32[s77, s27]" = helion__compiler_tracing_ops__host_tensor('out')
     store = helion_language_memory_ops_store(out, [block_size0, block_size1], add_1);  out = block_size0 = block_size1 = add_1 = store = None
     return None""",

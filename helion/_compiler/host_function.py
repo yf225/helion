@@ -95,14 +95,14 @@ class HostFunction:
             replacements[sym] = sympy.Symbol(origin.host_str(), integer=True)
         return pexpr(expr.xreplace(replacements))
 
-    def debug_types(self) -> str:
+    def debug_str(self) -> str:
         result = [
             print_ast(
                 self.location.to_ast(
                     ast.FunctionDef(self.name, self.args, self.body, [], None)
                 )
             ),
-            str(self.device_ir),
+            self.device_ir.debug_str(),
         ]
         if error_str := CompileEnvironment.current().errors.report(strip_paths=True):
             result.extend(error_str)

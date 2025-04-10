@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from .inductor_lowering import CodegenState
 
 
-@_decorators.api_custom_op()
+@_decorators.api()
 def _get_symnode(debug_name: str) -> int:
     raise AssertionError("this should never be called")
 
@@ -23,7 +23,7 @@ def _(state: CodegenState) -> ast.AST:
     return expr_from_string("_get_symnode")  # should be unused
 
 
-@_decorators.api_custom_op()
+@_decorators.api()
 def _host_tensor(debug_name: str) -> torch.Tensor:
     raise AssertionError("this should never be called")
 
