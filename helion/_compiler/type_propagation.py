@@ -19,7 +19,6 @@ import torch
 
 from .. import exc
 from ..autotuner.config_spec import BlockSizeSpec
-from ..autotuner.config_spec import PermutationSpec
 from ..language._decorators import is_api_func
 from .ast_extension import ExtendedAST
 from .ast_extension import LoopType
@@ -624,6 +623,8 @@ class CallableType(LiteralType):
         if is_api_func(fn := self.value):
             if fn._is_device_only and origin.is_host():
                 raise exc.DeviceAPIOnHost(fn.__qualname__)
+            if fn._cache_type and ExtendedAST.current()[-1]._type_info is not None:
+                return ExtendedAST.current()[-1]._type_info
             assert fn._type_function is not None
             return fn._type_function(*args, **kwargs, origin=origin)
         # TODO(jansel): add no-tracing mode
@@ -654,7 +655,11 @@ class CallableType(LiteralType):
                 origin,
             )
             output_type.tree_map(warn_wrong_device)
-            if input_contains_tensor and output_type.contains_tensor():
+            if (
+                origin.is_host()
+                and input_contains_tensor
+                and output_type.contains_tensor()
+            ):
                 if not re.search("like|new|broadcast", self.name):
                     warning(exc.TensorOperationInWrapper(self.name))
             return output_type
@@ -847,10 +852,9 @@ class TileIndexType(TypeInfo):
             BlockSizeSpec(
                 size_hints=[env.size_hint(x) for x in numels],
                 allow_flattened=len(numels) > 1,
+                allow_reorder=len(numels) > 1,
             )
         )
-        if len(numels) > 1:
-            env.config_spec.loop_order_specs.append(PermutationSpec(len(numels)))
         return [TileIndexType(origin, env.allocate_block_size(x)) for x in numels]
 
     def merge(self, other: TypeInfo) -> TypeInfo:

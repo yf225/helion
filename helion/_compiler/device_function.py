@@ -19,9 +19,7 @@ from .ast_extension import expr_from_string
 from .ast_extension import statement_from_string
 from .compile_environment import CompileEnvironment
 from .host_function import HostFunction
-from .tile_strategy import FlattenedTileStrategy
-from .tile_strategy import NDTileStrategy
-from .tile_strategy import TileStrategy
+from .tile_strategy import TileStrategyDispatch
 from .variable_origin import BlockSizeOrigin
 from .variable_origin import Origin
 from .variable_origin import TensorSizeOrigin
@@ -116,10 +114,7 @@ class DeviceFunction:
         self._unique_counter: dict[str, itertools.count[int]] = defaultdict(
             itertools.count
         )
-        if isinstance(config.block_sizes[0], int):
-            self.tile_strategy: TileStrategy = FlattenedTileStrategy(self, config)
-        else:
-            self.tile_strategy: TileStrategy = NDTileStrategy(self, config)
+        self.tile_strategy: TileStrategyDispatch = TileStrategyDispatch(self, config)
         self.grid_expr: ast.AST | None = None
 
     def set_grid_expr(self, grid_expr: ast.AST) -> None:

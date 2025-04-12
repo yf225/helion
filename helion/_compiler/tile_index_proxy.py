@@ -35,6 +35,9 @@ class TileIndexProxy:
             raise NotImplementedError  # TODO(jansel): implement this
         raise exc.IncorrectTileUsage(func)
 
+    def __repr__(self) -> str:
+        return f"TileIndexProxy({self.block_size_index!r})"
+
     @classmethod
     def tiles_to_sizes(cls, it: _T) -> _T:
         return tree_map_only(TileIndexProxy, cls._tile_to_size, it)

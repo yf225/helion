@@ -40,3 +40,13 @@ def hl_full_usage(x: torch.Tensor) -> torch.Tensor:
         tmp += x[tile]
         out[tile] = tmp
     return out
+
+
+@helion.kernel
+def pointwise_device_loop(x: torch.Tensor) -> torch.Tensor:
+    out = torch.empty_like(x)
+    n, m = x.shape
+    for tile_n in hl.tile(n):
+        for tile_m in hl.tile(m):
+            out[tile_n, tile_m] = torch.sigmoid(x[tile_n, tile_m] + 1)
+    return out

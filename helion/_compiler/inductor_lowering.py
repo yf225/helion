@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from .. import Config
     from .device_function import DeviceFunction
     from .generate_ast import GenerateAST
-    from .tile_strategy import TileStrategy
+    from .tile_strategy import TileStrategyDispatch
 
 
 def prepare_graph_lowerings(gm: torch.fx.GraphModule) -> None:
@@ -118,7 +118,7 @@ def _unpack_symint(x: torch.SymInt | int) -> sympy.Expr:
 
 
 class Lowering:
-    def codegen(self, ctx: GraphInterpreter, node: torch.fx.Node) -> ast.AST:
+    def codegen(self, ctx: GraphInterpreter, node: torch.fx.Node) -> object:
         raise NotImplementedError
 
 
@@ -136,14 +136,14 @@ class InductorLowering(Lowering):
         assert len(input_asts) == len(self.input_names)
         return input_asts
 
-    def codegen(self, ctx: GraphInterpreter, node: torch.fx.Node) -> ast.AST:
+    def codegen(self, ctx: GraphInterpreter, node: torch.fx.Node) -> object:
         raise NotImplementedError(
             f"codegen not implemented for {type(self).__name__}: {self.buffer}"
         )
 
 
 class PointwiseLowering(InductorLowering):
-    def codegen(self, ctx: GraphInterpreter, node: torch.fx.Node) -> ast.AST:
+    def codegen(self, ctx: GraphInterpreter, node: torch.fx.Node) -> object:
         # pyre-ignore[19]
         with V.set_ops_handler(
             GenerateASTFromInductor(
@@ -165,7 +165,7 @@ class ReductionLowering(InductorLowering):
 class APIFuncLowering(Lowering):
     api_func: APIFunc
 
-    def codegen(self, ctx: GraphInterpreter, node: torch.fx.Node) -> ast.AST:
+    def codegen(self, ctx: GraphInterpreter, node: torch.fx.Node) -> object:
         assert not node.kwargs
         ast_args = [*map_arg(node.args, lambda arg: ctx.env[arg])]
         proxy_args = [*map_arg(node.args, lambda arg: arg.meta["val"])]
@@ -230,6 +230,8 @@ class GraphInterpreter(Interpreter):
             with self._set_current_node(n), n.meta["location"]:
                 lowering: Lowering = n.meta["lowering"]
                 result = lowering.codegen(self, n)
+                if result is None:
+                    return None
                 if not isinstance(result, ast.AST):
                     assert isinstance(
                         result, (int, torch.SymInt, torch.SymFloat, torch.SymBool)
@@ -280,7 +282,7 @@ class CodegenState(NamedTuple):
         return self.codegen.device_function
 
     @property
-    def tile_strategy(self) -> TileStrategy:
+    def tile_strategy(self) -> TileStrategyDispatch:
         return self.codegen.device_function.tile_strategy
 
     @property

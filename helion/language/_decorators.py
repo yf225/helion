@@ -20,8 +20,6 @@ from helion import exc
 from helion._compiler.compile_environment import CompileEnvironment
 
 if TYPE_CHECKING:
-    import ast
-
     from helion._compiler.inductor_lowering import CodegenState
     from helion._compiler.type_propagation import TypeInfo
     from helion._compiler.variable_origin import Origin
@@ -43,8 +41,9 @@ class APIFunc(Protocol):
     _is_device_loop: bool
     _is_device_only: bool
     _tiles_as_sizes: bool
+    _cache_type: bool
     _type_function: Callable[..., TypeInfo] | None
-    _codegen: Callable[[CodegenState], ast.AST] | None
+    _codegen: Callable[[CodegenState], object] | None
     _fake_fn: Callable[..., object] | None
     _signature: inspect.Signature
 
@@ -59,11 +58,28 @@ def is_api_func(fn: object) -> TypeGuard[APIFunc]:
     return getattr(fn, "_helion_api", False)
 
 
+def args_to_proxies(
+    tracer: proxy_tensor.PythonKeyTracer,
+    args: _T,
+    kwargs: dict[str, object] | None = None,
+) -> tuple[_T, dict[str, object]]:
+    return tree_map_only(
+        proxy_tensor._ProxyTensor,
+        lambda x: x.proxy,
+        tree_map_only(
+            (torch.Tensor, torch.SymInt, torch.SymBool, torch.SymFloat),
+            functools.partial(proxy_tensor.get_proxy_slot, tracer=tracer),
+            (args, kwargs or {}),
+        ),
+    )
+
+
 def api(
     *,
     is_device_loop: bool = False,
     is_device_only: bool = True,
     tiles_as_sizes: bool = False,
+    cache_type: bool = False,
     signature: inspect.Signature | None = None,
 ) -> _Decorator:
     def _impl(fn: _C) -> _C:
@@ -80,32 +96,22 @@ def api(
                 return fn(*args, **kwargs)
             assert isinstance(mode, proxy_tensor.ProxyTorchDispatchMode)
             tracer = mode.tracer
+            assert isinstance(tracer, proxy_tensor.PythonKeyTracer)
             # We hit type errors if we use the regular custom_op overload, instead we
             # intercept the call and fake the custom op.
             with proxy_tensor.disable_proxy_modes_tracing():
                 if tiles_as_sizes:
                     args, kwargs = TileIndexProxy.tiles_to_sizes((args, kwargs))
-                proxy_args, proxy_kwargs = tree_map_only(
-                    proxy_tensor._ProxyTensor,
-                    lambda x: x.proxy,
-                    tree_map_only(
-                        (torch.Tensor, torch.SymInt, torch.SymBool, torch.SymFloat),
-                        functools.partial(proxy_tensor.get_proxy_slot, tracer=tracer),
-                        (args, kwargs),
-                    ),
-                )
                 proxy_out = tracer.create_proxy(
                     "call_function",
                     wrapper,
-                    proxy_args,
-                    proxy_kwargs,
+                    *args_to_proxies(tracer, args, kwargs),
                 )
                 assert wrapper._fake_fn is not None
                 out = wrapper._fake_fn(*args, **kwargs)
-                if out is not None:
-                    proxy_tensor.track_tensor_tree(
-                        out, proxy_out, constant=None, tracer=tracer
-                    )
+                proxy_tensor.track_tensor_tree(
+                    out, proxy_out, constant=None, tracer=tracer
+                )
             return out
 
         api = cast("APIFunc", wrapper)
@@ -113,6 +119,7 @@ def api(
         api._is_device_loop = is_device_loop
         api._is_device_only = is_device_only
         api._tiles_as_sizes = tiles_as_sizes
+        api._cache_type = cache_type
         api._type_function = None
         api._codegen = None
         api._fake_fn = None
@@ -157,8 +164,8 @@ def type_propagation(
 
 def codegen(
     original_fn: Callable[..., object],
-) -> _NoReturnDecorator[ast.AST]:
-    def _impl(codegen_fn: Callable[[CodegenState], ast.AST]) -> Callable[..., Never]:
+) -> _NoReturnDecorator[object]:
+    def _impl(codegen_fn: Callable[[CodegenState], object]) -> Callable[..., Never]:
         assert is_api_func(original_fn), (
             f"{type_propagation.__qualname__} can only be used on API functions"
         )

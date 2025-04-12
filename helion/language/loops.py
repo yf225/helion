@@ -35,16 +35,16 @@ class TileIndexProtocol(Protocol):
 
 
 @overload
-@_decorators.api(is_device_loop=True, is_device_only=False)
+@_decorators.api(is_device_loop=True, is_device_only=False, cache_type=True)
 def tile(sizes: int) -> TileIndexProtocol: ...
 
 
 @overload
-@_decorators.api(is_device_loop=True, is_device_only=False)
+@_decorators.api(is_device_loop=True, is_device_only=False, cache_type=True)
 def tile(sizes: Sequence[int]) -> Sequence[TileIndexProtocol]: ...
 
 
-@_decorators.api(is_device_loop=True, is_device_only=False)
+@_decorators.api(is_device_loop=True, is_device_only=False, cache_type=True)
 def tile(sizes: int | Sequence[int]) -> TileIndexProtocol | Sequence[TileIndexProtocol]:
     """
     Break up an iteration space defined by a size or sequence of sizes into tiles.

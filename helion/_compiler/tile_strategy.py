@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import ast
+import collections
 import dataclasses
 import itertools
 from typing import TYPE_CHECKING
+from typing import NamedTuple
 from typing import TypeVar
 import weakref
 
@@ -10,6 +13,7 @@ import sympy
 import torch
 
 from .. import exc
+from .ast_extension import create
 from .ast_extension import expr_from_string
 from .ast_extension import statement_from_string
 from .compile_environment import CompileEnvironment
@@ -17,7 +21,6 @@ from .host_function import HostFunction
 from .variable_origin import BlockSizeOrigin
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
     from collections.abc import Sequence
 
     from ..autotuner.config_spec import BlockSizeSpec
@@ -26,23 +29,35 @@ if TYPE_CHECKING:
     from .inductor_lowering import CodegenState
 
     _T = TypeVar("_T")
+    SymIntLike = torch.SymInt | int
+    ShapeLike = Sequence[SymIntLike]
 
 
 @dataclasses.dataclass
 class TileStrategy:
     _fn: weakref.ReferenceType[DeviceFunction]
-    block_sizes: Iterator[list[int] | int]
-    loop_orders: Iterator[list[int]]
+    block_indices: list[int]
+    spec: BlockSizeSpec
+    block_size: list[int] | int
+    loop_order: list[int]
 
     def __init__(
         self,
         fn: DeviceFunction,
-        config: Config,
+        block_indices: list[int],
+        spec: BlockSizeSpec,
+        block_size: list[int] | int,
+        loop_order: list[int],
     ) -> None:
         self._fn = weakref.ref(fn)
-        self.config = config
-        self.block_sizes = iter(config.block_sizes)
-        self.loop_orders = iter(config.loop_orders)
+        self.block_indices = block_indices
+        self.spec = spec
+        self.block_size = block_size
+        self.loop_order = loop_order
+        self.index_vars: dict[int, str] = {
+            block_idx: self.fn.new_var(f"block_idx_{block_idx}")
+            for block_idx in block_indices
+        }
 
     @property
     def fn(self) -> DeviceFunction:
@@ -53,15 +68,15 @@ class TileStrategy:
     def _reorder(self, block_indices: list[_T]) -> list[_T]:
         if len(block_indices) <= 1:
             return block_indices
-        order = next(self.loop_orders)
+        order = self.loop_order
         assert len(order) == len(block_indices), (
             f"Invalid order length: {len(order)} != {len(block_indices)}"
         )
         assert {*order} == {*range(len(order))}, f"Invalid permutation: {order}"
         return [block_indices[i] for i in reversed(order)]
 
-    def index_var(self, dim: int) -> str:
-        return self.fn.new_var(f"block_idx_{dim}")
+    def index_var(self, block_idx: int) -> str:
+        return self.index_vars[block_idx]
 
     def mask_var(self, block_idx: int) -> str | None:
         raise NotImplementedError
@@ -69,19 +84,19 @@ class TileStrategy:
     def block_size_var(self, block_idx: int) -> str | None:
         raise NotImplementedError
 
-    def codegen_grid(self, state: CodegenState, block_indices: list[int]) -> None:
+    def codegen_grid(self, state: CodegenState) -> None:
         raise NotImplementedError
 
-    def shape_str(self, shape: Sequence[int | torch.SymInt]) -> str:
+    def codegen_device_loop(self, state: CodegenState) -> tuple[ast.For, list[ast.AST]]:
         raise NotImplementedError
 
-    def expand_str(self, shape: Sequence[int | torch.SymInt], i: int) -> str:
+    def compact_shape(self, shapes: list[CompactedShape]) -> list[CompactedShape]:
         raise NotImplementedError
 
     @classmethod
-    def _get_block_index(cls, size: int | torch.SymInt | sympy.Expr) -> int | None:
+    def get_block_index(cls, size: int | torch.SymInt | sympy.Expr) -> int | None:
         if isinstance(size, torch.SymInt):
-            return cls._get_block_index(size._sympy_())
+            return cls.get_block_index(size._sympy_())
         if isinstance(size, sympy.Symbol):
             if isinstance(
                 origin := HostFunction.current().symbol_to_origin[size.name].origin,
@@ -94,31 +109,49 @@ class TileStrategy:
 class FlattenedTileStrategy(TileStrategy):
     """Collapse all dimensions into single flat iteration space."""
 
-    def mask_var(self, block_idx: int) -> str:
+    block_size: int
+
+    def __init__(
+        self,
+        fn: DeviceFunction,
+        block_indices: list[int],
+        spec: BlockSizeSpec,
+        block_size: list[int] | int,
+        loop_order: list[int],
+    ) -> None:
+        assert isinstance(block_size, int)
+        super().__init__(fn, block_indices, spec, block_size, loop_order)
         # TODO(jansel): optimize away unneeded masks and return None
-        # TODO(jansel): mask_0_1_2
-        return self.fn.new_var("mask")
+        self._mask_var: str = self.fn.new_var(
+            "mask_" + "_".join(map(str, self.block_indices))
+        )
+        self._block_size_var: str = self.fn.new_var(
+            "BLOCK_SIZE_" + "_".join(map(str, self.block_indices))
+        )
+
+    def mask_var(self, block_idx: int) -> str:
+        return self._mask_var
 
     def block_size_var(self, block_idx: int) -> str:
-        return self.fn.new_var("BLOCK_SIZE")
+        return self._block_size_var
 
-    def codegen_grid(self, state: CodegenState, block_indices: list[int]) -> None:
+    def _codegen_common(
+        self, state: CodegenState
+    ) -> tuple[str, str, sympy.Expr, list[ast.AST]]:
+        block_indices = self.block_indices
         env = CompileEnvironment.current()
-        dtype = env.triton_index_type()
         total_numel = sympy.S.One
         device_fn = state.device_function
-        offsets_var = device_fn.new_var("offsets")
+        offsets_var = device_fn.new_var("offsets_" + "_".join(map(str, block_indices)))
         mask_var = self.mask_var(-1)
         block_size_var = self.block_size_var(-1)
-        block_size = next(self.block_sizes)
+        block_size = self.block_size
         assert isinstance(block_size, int)
+        statements = []
         state.codegen.host_statements.append(
             statement_from_string(f"{block_size_var} = {block_size!r}")
         )
         state.device_function.constexpr_arg(block_size_var)
-        state.add_statement(
-            f"{offsets_var} = tl.program_id(0) * ({block_size_var}) + tl.arange(0, {block_size_var}).to({dtype})"
-        )
         for i, block_idx in enumerate(self._reorder(block_indices)):
             # need to get the block size
             numel = env.block_sizes[block_idx].numel
@@ -128,18 +161,58 @@ class FlattenedTileStrategy(TileStrategy):
                 expr = f"({expr}) // ({device_fn.sympy_expr(total_numel)})"
             if i + 1 < len(block_indices):
                 expr = f"({expr}) % ({device_fn.sympy_expr(numel)})"
-            state.add_statement(f"{block_index_var} = {expr}")
+            statements.append(statement_from_string(f"{block_index_var} = {expr}"))
             total_numel = total_numel * numel
 
         assert mask_var is not None
-        state.add_statement(
-            f"{mask_var} = {offsets_var} < ({device_fn.sympy_expr(total_numel)})"
+        statements.append(
+            statement_from_string(
+                f"{mask_var} = {offsets_var} < ({device_fn.sympy_expr(total_numel)})"
+            )
         )
+        return block_size_var, offsets_var, total_numel, statements
+
+    def codegen_grid(self, state: CodegenState) -> None:
+        block_size_var, offsets_var, total_numel, statements = self._codegen_common(
+            state
+        )
+        dtype = CompileEnvironment.current().triton_index_type()
+        state.add_statement(
+            f"{offsets_var} = tl.program_id(0) * ({block_size_var}) + tl.arange(0, {block_size_var}).to({dtype})"
+        )
+        state.codegen.statements_stack[-1].extend(statements)
         state.device_function.set_grid_expr(
             expr_from_string(
                 f"(triton.cdiv({HostFunction.current().sympy_expr(total_numel)}, {block_size_var}), 1, 1)"
             )
         )
+
+    def codegen_device_loop(self, state: CodegenState) -> tuple[ast.For, list[ast.AST]]:
+        block_size_var, offsets_var, total_numel, statements = self._codegen_common(
+            state
+        )
+        dtype = CompileEnvironment.current().triton_index_type()
+        lid = state.device_function.new_var(
+            "lid_" + "_".join(map(str, self.block_indices))
+        )
+        for_node = create(
+            ast.For,
+            target=create(ast.Name, id=lid, ctx=ast.Store()),
+            iter=expr_from_string(
+                f"range(tl.cdiv({state.device_function.sympy_expr(total_numel)}, {block_size_var}))"
+            ),
+            body=(
+                body := [
+                    statement_from_string(
+                        f"{offsets_var} = {lid} * {block_size_var} + tl.arange(0, {block_size_var}).to({dtype})"
+                    ),
+                    *statements,
+                ]
+            ),
+            orelse=[],
+            type_comment=None,
+        )
+        return for_node, body
 
     @classmethod
     def update_allow_flattened(
@@ -148,7 +221,7 @@ class FlattenedTileStrategy(TileStrategy):
         block_cnt = itertools.count()
         used_indices = {}
         for i, x in enumerate(shape):
-            block_idx = cls._get_block_index(x)
+            block_idx = cls.get_block_index(x)
             if block_idx is not None:
                 if block_idx in used_indices:
                     # multiple usages of the same block size??? bail out
@@ -173,71 +246,42 @@ class FlattenedTileStrategy(TileStrategy):
                     spec.allow_flattened = False
                     break
 
-    def _compact_shape(
-        self, shape: Sequence[int | torch.SymInt]
-    ) -> tuple[int, list[int]]:
-        # TODO(jansel): support multiple block size groups here (mirror above behavior)
-        num_block_sizes = len(CompileEnvironment.current().block_sizes)
-        seen_block_size: int = -1
-        output_rank = 0
+    def compact_shape(self, shapes: list[CompactedShape]) -> list[CompactedShape]:
         output = []
-        for s in shape:
-            block_size_idx = self._get_block_index(s)
-            if block_size_idx is None:
-                assert seen_block_size == -1
-                output.append(output_rank)
-                output_rank += 1
-            else:
-                if seen_block_size == -1:
-                    seen_block_size = block_size_idx
-                    output.append(output_rank)
-                    output_rank += 1
-                else:
-                    assert seen_block_size + 1 == block_size_idx
-                    seen_block_size = block_size_idx
-                    output.append(output[-1])
-                if seen_block_size == num_block_sizes - 1:
-                    seen_block_size = -1
-        assert seen_block_size == -1
-        return output_rank, output
-
-    def shape_str(self, shape: Sequence[int | torch.SymInt]) -> str:
-        rank, compacted = self._compact_shape(shape)
-        output: list[str | None] = [None for _ in range(rank)]
-        assert len(compacted) == len(shape)
-        for i, s in zip(compacted, shape):
-            block_size_idx = self._get_block_index(s)
-            if block_size_idx is None:
-                assert output[i] is None
-                output[i] = self.fn.literal_expr(s)
-            else:
-                output[i] = self.block_size_var(-1)
-        return f"[{', '.join(map(str, output))}]"
-
-    def expand_str(self, shape: Sequence[int | torch.SymInt], i: int) -> str:
-        rank, compacted = self._compact_shape(shape)
-        output = ["None"] * rank
-        output[compacted[i]] = ":"
-        if output == [":"]:
-            return ""
-        return f"[{', '.join(output)}]"
+        shape_queue = collections.deque(shapes)
+        while shape_queue:
+            shape = shape_queue.popleft()
+            if (
+                len(shape.block_indices) != 1
+                or shape.block_indices[0] not in self.block_indices
+            ):
+                output.append(shape)
+                continue
+            assert shape.block_indices[0] == self.block_indices[0]
+            for expected in self.block_indices[1:]:
+                new_shape = shape_queue.popleft()
+                assert len(new_shape.block_indices) == 1
+                assert new_shape.block_indices[0] == expected
+                shape = shape.combine(new_shape)
+            output.append(shape)
+        return output
 
 
 class NDTileStrategy(TileStrategy):
     """Do up to 3D tiling using the kernel grid."""
 
+    block_size: list[int]
+
     def __init__(
         self,
         fn: DeviceFunction,
-        config: Config,
+        block_indices: list[int],
+        spec: BlockSizeSpec,
+        block_size: list[int] | int,
+        loop_order: list[int],
     ) -> None:
-        super().__init__(fn=fn, config=config)
-        self.nontrivial_block_sizes: int = 0
-        for sizes in self.config.block_sizes:
-            if isinstance(sizes, list):
-                self.nontrivial_block_sizes += sum(s != 1 for s in sizes)
-            elif sizes != 1:
-                self.nontrivial_block_sizes += 1
+        assert isinstance(block_size, list)
+        super().__init__(fn, block_indices, spec, block_size, loop_order)
         self.mask_vars: dict[int, str | None] = {}
         self.block_size_vars: dict[int, str | None] = {}
 
@@ -247,12 +291,12 @@ class NDTileStrategy(TileStrategy):
     def block_size_var(self, block_idx: int) -> str | None:
         return self.block_size_vars[block_idx]
 
-    def codegen_grid(self, state: CodegenState, block_indices: list[int]) -> None:
+    def codegen_grid(self, state: CodegenState) -> None:
+        block_indices = self.block_indices
         env = CompileEnvironment.current()
         device_fn = state.device_function
         dtype = env.triton_index_type()
-        block_sizes = next(self.block_sizes)
-        assert isinstance(block_sizes, list)
+        block_sizes = self.block_size
         assert len(block_sizes) == len(block_indices)
         if len(block_sizes) > 3:
             raise exc.MaximumGridRank(len(block_sizes))
@@ -294,41 +338,165 @@ class NDTileStrategy(TileStrategy):
                 grid.append(HostFunction.current().sympy_expr(numel))
         state.device_function.set_grid_expr(expr_from_string(f"({', '.join(grid)},)"))
 
-    def shape_str(self, shape: Sequence[int | torch.SymInt]) -> str:
-        result = []
-        for s in shape:
-            if self.is_dropped_size(s):
-                continue  # drop size=1 dimensions
-            result.append(self.fn.literal_expr(s))
+    def codegen_device_loop(self, state: CodegenState) -> tuple[ast.For, list[ast.AST]]:
+        block_indices = self.block_indices
+        env = CompileEnvironment.current()
+        device_fn = state.device_function
+        dtype = env.triton_index_type()
+        block_sizes = self.block_size
+        body = innermost_body = []
+        for_node: ast.For | None = None
+        assert len(block_sizes) == len(block_indices)
+        for block_idx, block_size in self._reorder([*zip(block_indices, block_sizes)]):
+            numel = env.block_sizes[block_idx].numel
+            offsets_var = self.index_var(block_idx)
+            start_var = self.fn.new_var(f"start_{block_idx}")
+            if block_size != 1:
+                self.block_size_vars[block_idx] = block_size_var = device_fn.new_var(
+                    f"BLOCK_SIZE_{block_idx}"
+                )
+                state.device_function.constexpr_arg(block_size_var)
+                state.codegen.host_statements.append(
+                    statement_from_string(f"{block_size_var} = {block_size!r}")
+                )
+                self.mask_vars[block_idx] = mask_var = self.fn.new_var(
+                    f"mask_{block_idx}"
+                )
+            else:
+                self.mask_vars[block_idx] = mask_var = None
+                self.block_size_vars[block_idx] = None
+                block_size_var = "1"
+            for_node = create(
+                ast.For,
+                target=create(ast.Name, id=start_var, ctx=ast.Store()),
+                iter=expr_from_string(
+                    f"range(0, ({device_fn.sympy_expr(numel)}), {block_size_var})"
+                ),
+                body=body,
+                orelse=[],
+                type_comment=None,
+            )
+            assert for_node.body is body
+            body.insert(
+                0,
+                statement_from_string(
+                    f"{offsets_var} = {start_var} + tl.arange(0, ({block_size_var})).to({dtype})"
+                ),
+            )
+            if mask_var is not None:
+                body.insert(
+                    1,
+                    statement_from_string(
+                        f"{mask_var} = ({offsets_var} < ({device_fn.sympy_expr(numel)}))"
+                    ),
+                )
+            body = [for_node]
+        assert for_node is not None
+        return for_node, innermost_body
+
+    def compact_shape(self, shapes: list[CompactedShape]) -> list[CompactedShape]:
+        # TODO(jansel): we should combine size==1 dimensions here
+        return shapes
+
+
+class TileStrategyDispatch:
+    def __init__(
+        self,
+        fn: DeviceFunction,
+        config: Config,
+    ) -> None:
+        specs = CompileEnvironment.current().config_spec.block_size_specs
+        block_size_idx = itertools.count()
+        block_sizes = config.block_sizes
+        loop_orders = collections.deque(config.loop_orders)
+        assert len(block_sizes) == len(specs)
+        self.block_index_to_strategy: dict[int, TileStrategy] = {}
+        self.strategies: list[TileStrategy] = []
+        for spec, block_size in zip(specs, block_sizes):
+            block_indices = [next(block_size_idx) for _ in range(len(spec))]
+            if spec.allow_reorder:
+                loop_order = loop_orders.popleft()
+            else:
+                loop_order = [*range(len(spec))]
+            strategy_cls = (
+                FlattenedTileStrategy if isinstance(block_size, int) else NDTileStrategy
+            )
+            strategy = strategy_cls(fn, block_indices, spec, block_size, loop_order)
+            self.strategies.append(strategy)
+            for idx in block_indices:
+                self.block_index_to_strategy[idx] = strategy
+        assert not loop_orders
+
+    def index_var(self, block_idx: int) -> str:
+        return self.block_index_to_strategy[block_idx].index_var(block_idx)
+
+    def mask_var(self, block_idx: int) -> str | None:
+        return self.block_index_to_strategy[block_idx].mask_var(block_idx)
+
+    def block_size_var(self, block_idx: int) -> str | None:
+        return self.block_index_to_strategy[block_idx].block_size_var(block_idx)
+
+    def codegen_grid(self, state: CodegenState, block_indices: list[int]) -> None:
+        strategy = self.block_index_to_strategy[block_indices[0]]
+        assert strategy.block_indices == block_indices
+        return strategy.codegen_grid(state)
+
+    def codegen_device_loop(
+        self, state: CodegenState, block_indices: list[int]
+    ) -> tuple[ast.For, list[ast.AST]]:
+        strategy = self.block_index_to_strategy[block_indices[0]]
+        assert strategy.block_indices == block_indices
+        return strategy.codegen_device_loop(state)
+
+    def _compact_shape(self, shapes: ShapeLike) -> list[CompactedShape]:
+        compacted_shapes = []
+        for idx, shape in enumerate(shapes):
+            block_idx = TileStrategy.get_block_index(shape)
+            if block_idx is None:
+                compacted_shapes.append(
+                    CompactedShape(self.strategies[0].fn.literal_expr(shape), [idx], [])
+                )
+            else:
+                block_size = self.block_size_var(block_idx)
+                if block_size is None:
+                    block_size = "1"
+                compacted_shapes.append(CompactedShape(block_size, [idx], [block_idx]))
+        for strategy in self.strategies:
+            compacted_shapes = strategy.compact_shape(compacted_shapes)
+        return compacted_shapes
+
+    def shape_str(self, shape: ShapeLike) -> str:
+        compacted_shapes = self._compact_shape(shape)
+        result = [s.size_str for s in compacted_shapes]
         return f"[{', '.join(result)}]"
 
-    def expand_str(self, shape: Sequence[int | torch.SymInt], i: int) -> str:
+    def expand_str(self, shape: ShapeLike, i: int) -> str:
         assert 0 <= i < len(shape)
+        compacted_shapes = self._compact_shape(shape)
         result = []
-        nextval = "None"
-        for j, s in enumerate(shape):
-            if not self.is_dropped_size(s):
-                result.append(nextval)
-                nextval = "None"
-            if i == j:
-                if result:
-                    result[-1] = ":"
-                else:
-                    nextval = ":"
+        for dim in compacted_shapes:
+            if i in dim.user_indices:
+                result.append(":")
+            else:
+                result.append("None")
         if result == [":"]:
             return ""
         return f"[{', '.join(result)}]"
 
-    def is_dropped_size(self, size: int | torch.SymInt) -> bool:
-        # TODO(jansel): enable this optimization
-        """
-        if isinstance(size, torch.SymInt):
-            if isinstance(sym := size._sympy_(), sympy.Symbol):
-                if isinstance(
-                    origin := HostFunction.current().symbol_to_origin[sym.name].origin,
-                    BlockSizeOrigin,
-                ):
-                    return self.block_size_vars[origin.block_size_idx] is None
-        return False
-        """
-        return False
+
+class CompactedShape(NamedTuple):
+    size_str: str
+    user_indices: list[int]
+    block_indices: list[int]
+
+    def combine(self, other: CompactedShape) -> CompactedShape:
+        size_str = self.size_str
+        if size_str == "1":
+            size_str = other.size_str
+        else:
+            assert other.size_str in ("1", size_str)
+        return CompactedShape(
+            size_str=size_str,
+            user_indices=[*self.user_indices, *other.user_indices],
+            block_indices=[*self.block_indices, *other.block_indices],
+        )

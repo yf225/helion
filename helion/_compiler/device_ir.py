@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import re
 import textwrap
+from typing import TYPE_CHECKING
 from typing import Callable
 from unittest.mock import patch
 
@@ -11,24 +13,36 @@ from torch._dynamo.convert_frame import compile_lock
 from torch._inductor.decomposition import select_decomp_table
 from torch.fx.experimental import proxy_tensor
 from torch.fx.traceback import preserve_node_meta
+from torch.utils import _pytree as pytree
 
 from .. import exc
 from .. import language as hl
+from ..language._decorators import args_to_proxies
+from ..language._tracing_ops import _for_loop
+from ..language._tracing_ops import _get_symnode
+from ..language._tracing_ops import _host_tensor
 from .ast_extension import ExtendedAST
 from .ast_extension import LoopType
 from .ast_extension import NodeVisitor
 from .ast_extension import create
+from .ast_read_writes import ReadWrites
+from .ast_read_writes import ast_read_writes
 from .compile_environment import CompileEnvironment
 from .host_function import HostFunction
+from .inductor_lowering import CodegenState
+from .inductor_lowering import codegen_call_with_graph
 from .inductor_lowering import prepare_graph_lowerings
 from .source_location import current_location
-from .tracing_ops import _get_symnode
-from .tracing_ops import _host_tensor
 from .type_propagation import IterType
 from .type_propagation import SequenceType
 from .type_propagation import TensorType
+from .type_propagation import TileIndexType
+from .type_propagation import TypeInfo
 from .type_propagation import _eval_binary
 from .type_propagation import _eval_unary
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def _make_fx(fn: Callable[..., object], *args: object) -> torch.fx.GraphModule:
@@ -90,30 +104,76 @@ def _make_fx(fn: Callable[..., object], *args: object) -> torch.fx.GraphModule:
         )
 
 
+@dataclasses.dataclass
+class GraphInfo:
+    graph_id: int
+    graph: torch.fx.GraphModule
+
+    @property
+    def name(self) -> str:
+        return "device_ir" if self.graph_id == -1 else f"subgraph_{self.graph_id}"
+
+    def __str__(self) -> str:
+        output = self.graph.print_readable(print_output=False).strip()
+        return textwrap.dedent(
+            re.sub("^[^\n]+\n", "", output).replace("forward(self)", f"{self.name}()")
+        )
+
+    def codegen(self, state: CodegenState) -> None:
+        raise NotImplementedError
+
+
+class RootGraphInfo(GraphInfo):
+    pass
+
+
+@dataclasses.dataclass
+class ForLoopGraphInfo(GraphInfo):
+    block_indices: list[int]
+
+    def codegen(self, state: CodegenState) -> None:
+        for_node, statements = state.device_function.tile_strategy.codegen_device_loop(
+            state, self.block_indices
+        )
+        args = state.ast_args[1]
+        assert isinstance(args, list)
+        assert all(isinstance(x, ast.AST) for x in args)
+        with state.codegen.set_statements(statements):
+            codegen_call_with_graph(
+                state.codegen,
+                self.graph,
+                args,
+            )
+        state.add_statement(for_node)
+
+
 class DeviceIR:
     def __init__(self) -> None:
         super().__init__()
-        self.graphs: list[torch.fx.GraphModule] = []
+        self.graphs: list[GraphInfo] = []
         self.root: torch.fx.GraphModule | None = None
 
     def __str__(self) -> str:
-        assert len(self.graphs) == 1
-        output = self.graphs[0].print_readable(print_output=False).strip()
-        return textwrap.dedent(
-            re.sub("^[^\n]+\n", "", output).replace("forward(self)", "device_ir()")
-        )
+        return "\n\n".join(map(str, self.graphs))
 
     def debug_str(self) -> str:
         result = str(self)
-        return re.sub(r"(# File:\s+).*/([^/:]+:\d+)", r"\1.../\2", result)
+        return re.sub(r" ?(# File:\s+).*/([^/:]+:\d+)", r"\1.../\2", result)
 
-    def add_graph(self, graph: torch.fx.GraphModule) -> None:
-        self.graphs.append(graph)
+    def add_graph(
+        self,
+        graph: torch.fx.GraphModule,
+        graph_info_cls: type[GraphInfo] = GraphInfo,
+        **kwargs: object,
+    ) -> int:
+        graph_id = len(self.graphs)
+        self.graphs.append(graph_info_cls(graph_id=graph_id, graph=graph, **kwargs))
+        return graph_id
 
     def add_root_graph(self, graph: torch.fx.GraphModule) -> None:
         assert self.root is None
         self.root = graph
-        self.add_graph(graph)
+        self.graphs.append(RootGraphInfo(graph_id=-1, graph=graph))
 
 
 class WalkDeviceAST(NodeVisitor):
@@ -158,15 +218,73 @@ class WalkDeviceAST(NodeVisitor):
 
     def visit_For(self, node: ast.For) -> None:
         assert isinstance(node, ExtendedAST)
+        assert not node.orelse
+        assert isinstance(node.iter, ExtendedAST)
+        iter_type = node.iter._type_info
+        assert isinstance(iter_type, IterType)
+        inner_type: TypeInfo = iter_type.inner
         if node._loop_type == LoopType.GRID:
-            assert not node.orelse
-            assert isinstance(node.iter, ExtendedAST)
-            iter_type = node.iter._type_info
-            assert isinstance(iter_type, IterType)
-            self._assign(node.target, iter_type.inner.proxy())
+            self._assign(node.target, inner_type.proxy())
             self._body(node.body)
         elif node._loop_type == LoopType.DEVICE:
-            raise NotImplementedError
+            rw: ReadWrites = ast_read_writes(node)
+            inputs: LiftTensorArgs = LiftTensorArgs(
+                {k: self.scope[k] for k in rw if k in self.scope}
+            )
+            outputs: LiftTensorArgs | None = None
+
+            def run_subgraph(*args: object) -> list[object]:
+                nonlocal outputs
+                subgraph_walker = WalkDeviceAST(self.device_ir)
+                subgraph_walker.scope.update(inputs.replace_tensor_args(args))
+                subgraph_walker._assign(node.target, inner_type.proxy())
+                subgraph_walker._body(node.body)
+
+                outputs = LiftTensorArgs(
+                    {
+                        k: v
+                        for k, v in subgraph_walker.scope.items()
+                        if k in rw.writes
+                        and (k not in self.scope or self.scope[k] is not v)
+                    }
+                )
+                return outputs.get_tensor_args()
+
+            mode = proxy_tensor.get_proxy_mode()
+            assert isinstance(mode, proxy_tensor.ProxyTorchDispatchMode)
+            tracer = mode.tracer
+            with proxy_tensor.disable_proxy_modes_tracing():
+                graph = proxy_tensor.make_fx(
+                    run_subgraph, decomposition_table=select_decomp_table()
+                )(*inputs.get_tensor_args())
+                if isinstance(inner_type, SequenceType):
+                    iter_vars = inner_type.unpack()
+                else:
+                    iter_vars = [inner_type]
+                assert all(isinstance(x, TileIndexType) for x in iter_vars)
+                graph_idx = self.device_ir.add_graph(
+                    graph,
+                    ForLoopGraphInfo,
+                    block_indices=[x.block_size_idx for x in iter_vars],
+                )
+                args = (
+                    graph_idx,
+                    inputs.get_tensor_args(),
+                )
+                proxy_out = tracer.create_proxy(
+                    "call_function",
+                    _for_loop,
+                    *args_to_proxies(tracer, args),
+                )
+                assert outputs is not None
+                proxy_tensor.track_tensor_tree(
+                    [*outputs.get_tensor_args()],
+                    proxy_out,
+                    constant=None,
+                    tracer=tracer,
+                )
+            # TODO(jansel): need to generate phi nodes for any mutated variables
+            self.scope.update(outputs.unflatten())
         else:
             raise AssertionError(f"Unexpected loop type {node._loop_type}")
 
@@ -268,6 +386,34 @@ class WalkDeviceAST(NodeVisitor):
         except NotImplementedError:
             raise exc.CantReadOnDevice(type_info) from None
 
+    def visit_Constant(self, node: ast.Constant) -> object:
+        return node.value
+
+
+class LiftTensorArgs:
+    flat_values: list[object]
+    spec: pytree.TreeSpec
+    tensor_indices: list[int]
+
+    def __init__(self, values: dict[str, object]) -> None:
+        self.flat_values, self.spec = pytree.tree_flatten(values)
+        self.tensor_indices = [
+            i for i, v in enumerate(self.flat_values) if isinstance(v, torch.Tensor)
+        ]
+
+    def unflatten(self) -> dict[str, object]:
+        return pytree.tree_unflatten(self.flat_values, self.spec)
+
+    def replace_tensor_args(self, args: Sequence[object]) -> dict[str, object]:
+        flat_values = [*self.flat_values]
+        assert len(self.tensor_indices) == len(args)
+        for i, v in zip(self.tensor_indices, args):
+            flat_values[i] = v
+        return pytree.tree_unflatten(flat_values, self.spec)
+
+    def get_tensor_args(self) -> list[object]:
+        return [self.flat_values[i] for i in self.tensor_indices]
+
 
 class WalkHostAST(NodeVisitor):
     def __init__(self, device_ir: DeviceIR) -> None:
@@ -292,5 +438,5 @@ def lower_to_device_ir(func: HostFunction) -> DeviceIR:
             visitor.visit(stmt)
         CompileEnvironment.current().errors.raise_if_errors()
         for graph in device_ir.graphs:
-            prepare_graph_lowerings(graph)
+            prepare_graph_lowerings(graph.graph)
         return device_ir

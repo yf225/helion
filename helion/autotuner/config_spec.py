@@ -9,6 +9,8 @@ from ..exc import InvalidConfig
 import helion
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ..runtime.config import Config
 
 DEFAULT_NUM_WARPS = 4
@@ -18,7 +20,14 @@ DEFAULT_NUM_STAGES = 3
 @dataclasses.dataclass
 class ConfigSpec:
     block_size_specs: list[BlockSizeSpec] = dataclasses.field(default_factory=list)
-    loop_order_specs: list[PermutationSpec] = dataclasses.field(default_factory=list)
+
+    def loop_order_specs(self) -> Sequence[PermutationSpec]:
+        """Return the specs for the loop orders."""
+        return [
+            PermutationSpec(len(spec))
+            for spec in self.block_size_specs
+            if spec.allow_reorder
+        ]
 
     def normalize(self, config: Config | dict[str, object]) -> None:
         """Normalize the config to match the block_sizes and validate the config."""
@@ -91,11 +100,12 @@ class ConfigSpec:
     def normalize_loop_orders(self, loop_orders: object) -> list[list[int]]:
         assert isinstance(loop_orders, (list, tuple, type(None)))
         loop_orders = [*(loop_orders or ())]
-        if len(loop_orders) > len(self.loop_order_specs):
+        specs = self.loop_order_specs()
+        if len(loop_orders) > len(specs):
             raise InvalidConfig(
-                f"Too many loop orders, expected {len(self.loop_order_specs)}, got {len(loop_orders)}"
+                f"Too many loop orders, expected {len(specs)}, got {len(loop_orders)}"
             )
-        for i, spec in enumerate(self.loop_order_specs):
+        for i, spec in enumerate(specs):
             if i < len(loop_orders):
                 loop_orders[i] = spec.normalize(loop_orders[i])
             else:
@@ -118,6 +128,7 @@ class BlockSizeSpec:
     size_hints: list[int]
     # TODO(jansel): need to flip this false if tl.dot is used
     allow_flattened: bool
+    allow_reorder: bool
 
     def can_be_int(self) -> bool:
         return len(self.size_hints) == 1 or self.allow_flattened

@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+import ast
+from typing import TYPE_CHECKING
+
+import torch
+
+from .._compiler.ast_extension import create
+from .._compiler.ast_extension import expr_from_string
+from .._compiler.host_function import HostFunction
+from . import _decorators
+
+if TYPE_CHECKING:
+    from .._compiler.inductor_lowering import CodegenState
+
+"""
+This file contains "fake" ops that cannot appear in user program but
+are generated while compiling the user program. These ops are used to
+generate code for certain constructs.
+"""
+
+
+@_decorators.api()
+def _get_symnode(debug_name: str) -> int:
+    """FX requires a torch.SymInt to come from an op. This is a fake op is added lazily to work around this."""
+    raise AssertionError("this should never be called")
+
+
+@_decorators.codegen(_get_symnode)
+def _(state: CodegenState) -> ast.AST:
+    return expr_from_string("_get_symnode")  # should be unused
+
+
+@_decorators.api()
+def _host_tensor(debug_name: str) -> torch.Tensor:
+    """Source of a tensor that was allocated on the host and must be passed to the kernel as an arg."""
+    raise AssertionError("this should never be called")
+
+
+@_decorators.codegen(_host_tensor)
+def _(state: CodegenState) -> ast.AST:
+    fake_value = state.fake_value
+    assert isinstance(fake_value, torch.Tensor)
+    name = state.device_function.tensor_arg(
+        fake_value, prefer_name=state.fx_node.name
+    ).name
+    return create(ast.Name, id=name, ctx=ast.Load())
+
+
+@_decorators.api()
+def _for_loop(graph_id: int, args: list[object]) -> list[object]:
+    """`for` loops are mapped to this op since FX does not support control flow."""
+    raise AssertionError("this should never be called")
+
+
+@_decorators.codegen(_for_loop)
+def _(state: CodegenState) -> None:
+    return HostFunction.current().device_ir.graphs[state.proxy_arg(0)].codegen(state)

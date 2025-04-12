@@ -22,7 +22,7 @@ class _FixedMessage(Base):
         self.location: SourceLocation = current_location()
         msg = self.__class__.message.format(*args, **kwargs)
         self.base_msg_len: int = len(msg)
-        if self.location:
+        if self.location and "Original traceback:" not in msg:
             msg += self.location_suffix.format(location=self.location.format())
         super().__init__(msg)
 
