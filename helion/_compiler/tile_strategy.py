@@ -122,12 +122,11 @@ class FlattenedTileStrategy(TileStrategy):
         assert isinstance(block_size, int)
         super().__init__(fn, block_indices, spec, block_size, loop_order)
         # TODO(jansel): optimize away unneeded masks and return None
-        self._mask_var: str = self.fn.new_var(
-            "mask_" + "_".join(map(str, self.block_indices))
-        )
-        self._block_size_var: str = self.fn.new_var(
-            "BLOCK_SIZE_" + "_".join(map(str, self.block_indices))
-        )
+        self._mask_var: str = self.new_var("mask")
+        self._block_size_var: str = self.new_var("BLOCK_SIZE")
+
+    def new_var(self, prefix: str) -> str:
+        return self.fn.new_var(f"{prefix}_{'_'.join(map(str, self.block_indices))}")
 
     def mask_var(self, block_idx: int) -> str:
         return self._mask_var
@@ -142,7 +141,7 @@ class FlattenedTileStrategy(TileStrategy):
         env = CompileEnvironment.current()
         total_numel = sympy.S.One
         device_fn = state.device_function
-        offsets_var = device_fn.new_var("offsets_" + "_".join(map(str, block_indices)))
+        offsets_var = self.new_var("offsets")
         mask_var = self.mask_var(-1)
         block_size_var = self.block_size_var(-1)
         block_size = self.block_size
@@ -192,9 +191,7 @@ class FlattenedTileStrategy(TileStrategy):
             state
         )
         dtype = CompileEnvironment.current().triton_index_type()
-        lid = state.device_function.new_var(
-            "lid_" + "_".join(map(str, self.block_indices))
-        )
+        lid = self.new_var("lid")
         for_node = create(
             ast.For,
             target=create(ast.Name, id=lid, ctx=ast.Store()),

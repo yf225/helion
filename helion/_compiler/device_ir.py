@@ -381,10 +381,12 @@ class WalkDeviceAST(NodeVisitor):
     def visit_Attribute(self, node: ast.Attribute) -> object:
         assert isinstance(node, ExtendedAST)
         type_info = node._type_info
-        try:
-            return type_info.proxy()
-        except NotImplementedError:
-            raise exc.CantReadOnDevice(type_info) from None
+        if not type_info.contains_tensor() or type_info.origin.is_host():
+            try:
+                return type_info.proxy()
+            except NotImplementedError:
+                raise exc.CantReadOnDevice(type_info) from None
+        return getattr(self.visit(node.value), node.attr)
 
     def visit_Constant(self, node: ast.Constant) -> object:
         return node.value

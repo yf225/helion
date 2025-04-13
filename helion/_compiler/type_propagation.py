@@ -152,6 +152,9 @@ class LocalScope(Scope):
         return {**self.variables}
 
 
+regexp_allowed_host_ops: re.Pattern[str] = re.compile("like|new|broadcast|promote")
+
+
 class TypeInfo:
     origin: Origin
 
@@ -327,7 +330,7 @@ class TypeInfo:
         return found
 
     def contains_tensor(self) -> bool:
-        return self.contains_type(TensorType)
+        return self.contains_type((TensorType, TensorAttributeType))
 
 
 class TensorType(TypeInfo):
@@ -516,6 +519,16 @@ class TensorAttributeType(TypeInfo):
     def attr(self) -> str:
         return self.origin.key
 
+    def proxy(self) -> object:
+        return getattr(self.tensor.proxy(), self.attr())
+
+    def merge(self, other: TypeInfo) -> TypeInfo:
+        if isinstance(other, TensorAttributeType) and self.attr() == other.attr():
+            combined_tensor = self.tensor.merge(other.tensor)
+            if isinstance(combined_tensor, TensorType):
+                return TensorAttributeType(self.origin, combined_tensor)
+        return super().merge(other)
+
     def propagate_call(
         self, args: tuple[TypeInfo, ...], kwargs: dict[str, TypeInfo], origin: Origin
     ) -> TypeInfo:
@@ -531,7 +544,23 @@ class TensorAttributeType(TypeInfo):
                 )
             except NotImplementedError:
                 return UnknownType(origin, f"Tensor.{attr}() args must be literals")
-        return UnknownType(origin, f"Tensor.{attr}() is not supported")
+
+        proxy_args = [x.tree_map(_to_proxy) for x in args]
+        proxy_kwargs = {k: v.tree_map(_to_proxy) for k, v in kwargs.items()}
+        try:
+            output_type = TypeInfo.from_example(
+                getattr(self.tensor.fake_value, attr)(*proxy_args, **proxy_kwargs),
+                origin,
+            )
+            if origin.is_host() and output_type.contains_tensor():
+                if not regexp_allowed_host_ops.search(attr):
+                    warning(exc.TensorOperationInWrapper(attr))
+            return output_type
+        except exc.Base:
+            raise
+        except Exception as e:
+            # TODO(jansel): point to other tracing modes
+            raise exc.TorchOpTracingError(e) from e
 
 
 class LiteralType(TypeInfo):
@@ -638,12 +667,7 @@ class CallableType(LiteralType):
                 nonlocal input_contains_tensor
                 input_contains_tensor = True
                 warn_wrong_device(arg)
-            elif isinstance(arg, UnknownType):
-                raise exc.TypePropagationError(arg)
-            try:
-                return arg.proxy()
-            except NotImplementedError:
-                raise exc.TracedArgNotSupported(arg) from None
+            return _to_proxy(arg)
 
         input_contains_tensor: bool = False
         env: CompileEnvironment = CompileEnvironment.current()
@@ -660,7 +684,7 @@ class CallableType(LiteralType):
                 and input_contains_tensor
                 and output_type.contains_tensor()
             ):
-                if not re.search("like|new|broadcast", self.name):
+                if not regexp_allowed_host_ops.search(self.name):
                     warning(exc.TensorOperationInWrapper(self.name))
             return output_type
         except exc.Base:
@@ -1856,6 +1880,15 @@ class TypePropagation(ast.NodeVisitor):
     visit_MatchClass: _VisitMethod = _not_supported
     visit_MatchAs: _VisitMethod = _not_supported
     visit_MatchOr: _VisitMethod = _not_supported
+
+
+def _to_proxy(arg: TypeInfo) -> object:
+    if isinstance(arg, UnknownType):
+        raise exc.TypePropagationError(arg)
+    try:
+        return arg.proxy()
+    except NotImplementedError:
+        raise exc.TracedArgNotSupported(arg) from None
 
 
 def propagate_types(func: HostFunction, fake_args: list[object]) -> None:

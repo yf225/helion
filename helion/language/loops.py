@@ -24,6 +24,9 @@ if TYPE_CHECKING:
 
     from .._compiler.inductor_lowering import CodegenState
 
+    # hl.tile doesn't actually return a tensor, but we say it does so user code can typecheck cleanly
+    TileOutput = torch.Tensor
+
 __all__ = ["TileIndexProtocol", "tile"]
 
 
@@ -36,16 +39,16 @@ class TileIndexProtocol(Protocol):
 
 @overload
 @_decorators.api(is_device_loop=True, is_device_only=False, cache_type=True)
-def tile(sizes: int) -> TileIndexProtocol: ...
+def tile(sizes: int) -> TileOutput: ...
 
 
 @overload
 @_decorators.api(is_device_loop=True, is_device_only=False, cache_type=True)
-def tile(sizes: Sequence[int]) -> Sequence[TileIndexProtocol]: ...
+def tile(sizes: Sequence[int]) -> Sequence[TileOutput]: ...
 
 
 @_decorators.api(is_device_loop=True, is_device_only=False, cache_type=True)
-def tile(sizes: int | Sequence[int]) -> TileIndexProtocol | Sequence[TileIndexProtocol]:
+def tile(sizes: int | Sequence[int]) -> TileOutput | Sequence[TileOutput]:
     """
     Break up an iteration space defined by a size or sequence of sizes into tiles.
     The generated tiles can flatten the iteration space into the product of the sizes,

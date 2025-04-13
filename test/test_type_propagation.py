@@ -7,7 +7,9 @@ import unittest
 from expecttest import TestCase
 import torch
 
+import helion
 from helion._testing import import_path
+import helion.language as hl
 
 if TYPE_CHECKING:
     from helion import Kernel
@@ -380,11 +382,11 @@ def all_ast_nodes(x, y):
     # Attribute: TensorAttributeType AttributeOrigin(value=ArgumentOrigin(name='x'), key='size')
     # Name: TensorType([y_size0, x_size1], torch.int32) ArgumentOrigin(name='x')
     attr3 = x.size()
-    # Call: UnknownType('Tensor.stride() is not supported') SourceOrigin(location=<SourceLocation all_ast_nodes.py:77>)
+    # Call: SequenceType((SymIntType(s27), LiteralType(1))) SourceOrigin(location=<SourceLocation all_ast_nodes.py:77>)
     # Attribute: TensorAttributeType AttributeOrigin(value=ArgumentOrigin(name='x'), key='stride')
     # Name: TensorType([y_size0, x_size1], torch.int32) ArgumentOrigin(name='x')
     attr4 = x.stride()
-    # Call: UnknownType('Tensor.stride() is not supported') SourceOrigin(location=<SourceLocation all_ast_nodes.py:78>)
+    # Call: SymIntType(s27) SourceOrigin(location=<SourceLocation all_ast_nodes.py:78>)
     # Attribute: TensorAttributeType AttributeOrigin(value=ArgumentOrigin(name='x'), key='stride')
     # Name: TensorType([y_size0, x_size1], torch.int32) ArgumentOrigin(name='x')
     # Constant: LiteralType(0) SourceOrigin(location=<SourceLocation all_ast_nodes.py:78>)
@@ -808,6 +810,62 @@ def subgraph_0():
 def device_ir():
     # File: .../basic_kernels.py:50 in pointwise_device_loop, code: for tile_m in hl.tile(m):
     _for_loop = helion_language__tracing_ops__for_loop(0, []);  _for_loop = None
+    return None""",
+        )
+
+    def test_method_call(self):
+        @helion.kernel
+        def fn(x):
+            out = torch.empty_like(x)
+            for tile in hl.tile(x.size()):
+                out[tile] = x[tile].sin()
+            return out
+
+        output = type_propagation_report(
+            fn,
+            torch.ones([512, 512], dtype=torch.int32),
+        )
+        self.assertExpectedInline(
+            output,
+            """\
+def fn(x):
+    # Call: TensorType([x_size0, x_size1], torch.int32) SourceOrigin(location=<SourceLocation test_type_propagation.py:819>)
+    # Attribute: CallableType(_VariableFunctionsClass.empty_like) AttributeOrigin(value=GlobalOrigin(name='torch'), key='empty_like')
+    # Name: PythonModuleType(torch) GlobalOrigin(name='torch')
+    # Name: TensorType([x_size0, x_size1], torch.int32) ArgumentOrigin(name='x')
+    # For: loop_type=GRID
+    out = torch.empty_like(x)
+    # Call: IterType(SequenceType([TileIndexType(0), TileIndexType(1)])) SourceOrigin(location=<SourceLocation test_type_propagation.py:820>)
+    # Attribute: CallableType(tile) AttributeOrigin(value=GlobalOrigin(name='hl'), key='tile')
+    # Name: PythonModuleType(helion.language) GlobalOrigin(name='hl')
+    # Call: SequenceType((SymIntType(s77), SymIntType(s27))) SourceOrigin(location=<SourceLocation test_type_propagation.py:820>)
+    # Attribute: TensorAttributeType AttributeOrigin(value=ArgumentOrigin(name='x'), key='size')
+    # Name: TensorType([x_size0, x_size1], torch.int32) ArgumentOrigin(name='x')
+    for tile in hl.tile(x.size()):
+        # Subscript: TensorType([block_size0, block_size1], torch.int32) DeviceOrigin(location=<SourceLocation test_type_propagation.py:821>)
+        # Name: TensorType([x_size0, x_size1], torch.int32) SourceOrigin(location=<SourceLocation test_type_propagation.py:819>)
+        # Name: SequenceType([TileIndexType(0), TileIndexType(1)]) SourceOrigin(location=<SourceLocation test_type_propagation.py:820>)
+        # Call: TensorType([block_size0, block_size1], torch.float32) DeviceOrigin(location=<SourceLocation test_type_propagation.py:821>)
+        # Attribute: TensorAttributeType AttributeOrigin(value=DeviceOrigin(location=<SourceLocation test_type_propagation.py:821>), key='sin')
+        # Subscript: TensorType([block_size0, block_size1], torch.int32) DeviceOrigin(location=<SourceLocation test_type_propagation.py:821>)
+        # Name: TensorType([x_size0, x_size1], torch.int32) ArgumentOrigin(name='x')
+        # Name: SequenceType([TileIndexType(0), TileIndexType(1)]) SourceOrigin(location=<SourceLocation test_type_propagation.py:820>)
+        out[tile] = x[tile].sin()
+    return out
+
+def device_ir():
+    # File: .../test_type_propagation.py:821 in fn, code: out[tile] = x[tile].sin()
+    x: "i32[s77, s27]" = helion_language__tracing_ops__host_tensor('x')
+    block_size0: "Sym(u0)" = helion_language__tracing_ops__get_symnode('block_size0')
+    block_size1: "Sym(u1)" = helion_language__tracing_ops__get_symnode('block_size1')
+    load: "i32[u0, u1]" = helion_language_memory_ops_load(x, [block_size0, block_size1]);  x = None
+
+    # File: .../test_type_propagation.py:821 in fn, code: out[tile] = x[tile].sin()
+    sin: "f32[u0, u1]" = torch.ops.aten.sin.default(load);  load = None
+
+    # File: .../test_type_propagation.py:821 in fn, code: out[tile] = x[tile].sin()
+    out: "i32[s77, s27]" = helion_language__tracing_ops__host_tensor('out')
+    store = helion_language_memory_ops_store(out, [block_size0, block_size1], sin);  out = block_size0 = block_size1 = sin = store = None
     return None""",
         )
 
