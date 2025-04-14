@@ -153,5 +153,5 @@ class _SubscriptIndexing(NamedTuple):
 
         return _SubscriptIndexing(
             expr_from_string("+".join(index_expr)),
-            expr_from_string("|".join(mask_values) or "None"),
+            expr_from_string("&".join(mask_values) or "None"),
         )

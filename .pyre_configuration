@@ -4,6 +4,10 @@
     {
       "import_root": ".",
       "source": "helion"
+    },
+    {
+      "import_root": ".",
+      "source": "examples"
     }
   ],
   "python_version": "3.9",

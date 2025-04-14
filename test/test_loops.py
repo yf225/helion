@@ -51,11 +51,11 @@ def _pointwise_device_loop_kernel(_x, _out, _out_stride_0, _out_stride_1, _x_str
     for _start_1 in range(0, _m, _BLOCK_SIZE_1):
         _block_idx_1 = _start_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
         _mask_1 = _block_idx_1 < _m
-        _load = tl.load(_x + (_block_idx_0[:, None] * _x_stride_0 + _block_idx_1[None, :] * _x_stride_1), _mask_0[:, None] | _mask_1[None, :], other=0)
+        _load = tl.load(_x + (_block_idx_0[:, None] * _x_stride_0 + _block_idx_1[None, :] * _x_stride_1), _mask_0[:, None] & _mask_1[None, :], other=0)
         _v_0 = 1.0
         _v_1 = _load + _v_0
         _v_2 = tl.sigmoid(_v_1)
-        tl.store(_out + (_block_idx_0[:, None] * _out_stride_0 + _block_idx_1[None, :] * _out_stride_1), _v_2, _mask_0[:, None] | _mask_1[None, :])
+        tl.store(_out + (_block_idx_0[:, None] * _out_stride_0 + _block_idx_1[None, :] * _out_stride_1), _v_2, _mask_0[:, None] & _mask_1[None, :])
 
 def pointwise_device_loop(x: torch.Tensor):
     out = torch.empty_like(x)
@@ -94,9 +94,9 @@ def _device_loop_3d_kernel(_x, _out, _out_stride_0, _out_stride_1, _out_stride_2
             for _start_3 in range(0, _d, _BLOCK_SIZE_3):
                 _block_idx_3 = _start_3 + tl.arange(0, _BLOCK_SIZE_3).to(tl.int32)
                 _mask_3 = _block_idx_3 < _d
-                _load = tl.load(_x + (_block_idx_0[:, None, None, None] * _x_stride_0 + _block_idx_1[None, :, None, None] * _x_stride_1 + _block_idx_2[None, None, :, None] * _x_stride_2 + _block_idx_3[None, None, None, :] * _x_stride_3), _mask_1[None, :, None, None] | _mask_2[None, None, :, None] | _mask_3[None, None, None, :], other=0)
+                _load = tl.load(_x + (_block_idx_0[:, None, None, None] * _x_stride_0 + _block_idx_1[None, :, None, None] * _x_stride_1 + _block_idx_2[None, None, :, None] * _x_stride_2 + _block_idx_3[None, None, None, :] * _x_stride_3), _mask_1[None, :, None, None] & _mask_2[None, None, :, None] & _mask_3[None, None, None, :], other=0)
                 _v_0 = tl_math.sin(_load)
-                tl.store(_out + (_block_idx_0[:, None, None, None] * _out_stride_0 + _block_idx_1[None, :, None, None] * _out_stride_1 + _block_idx_2[None, None, :, None] * _out_stride_2 + _block_idx_3[None, None, None, :] * _out_stride_3), _v_0, _mask_1[None, :, None, None] | _mask_2[None, None, :, None] | _mask_3[None, None, None, :])
+                tl.store(_out + (_block_idx_0[:, None, None, None] * _out_stride_0 + _block_idx_1[None, :, None, None] * _out_stride_1 + _block_idx_2[None, None, :, None] * _out_stride_2 + _block_idx_3[None, None, None, :] * _out_stride_3), _v_0, _mask_1[None, :, None, None] & _mask_2[None, None, :, None] & _mask_3[None, None, None, :])
 
 def device_loop_3d(x: torch.Tensor):
     out = torch.empty_like(x)
@@ -137,9 +137,9 @@ def _device_loop_3d_kernel(_x, _out, _out_stride_0, _out_stride_1, _out_stride_2
             _mask_1 = _block_idx_1 < _b
             for _start_3 in range(0, _d, 1):
                 _block_idx_3 = _start_3 + tl.arange(0, 1).to(tl.int32)
-                _load = tl.load(_x + (_block_idx_0[:, None, None, None] * _x_stride_0 + _block_idx_1[None, :, None, None] * _x_stride_1 + _block_idx_2[None, None, :, None] * _x_stride_2 + _block_idx_3[None, None, None, :] * _x_stride_3), _mask_0[:, None, None, None] | _mask_1[None, :, None, None] | _mask_2[None, None, :, None], other=0)
+                _load = tl.load(_x + (_block_idx_0[:, None, None, None] * _x_stride_0 + _block_idx_1[None, :, None, None] * _x_stride_1 + _block_idx_2[None, None, :, None] * _x_stride_2 + _block_idx_3[None, None, None, :] * _x_stride_3), _mask_0[:, None, None, None] & _mask_1[None, :, None, None] & _mask_2[None, None, :, None], other=0)
                 _v_0 = tl_math.sin(_load)
-                tl.store(_out + (_block_idx_0[:, None, None, None] * _out_stride_0 + _block_idx_1[None, :, None, None] * _out_stride_1 + _block_idx_2[None, None, :, None] * _out_stride_2 + _block_idx_3[None, None, None, :] * _out_stride_3), _v_0, _mask_0[:, None, None, None] | _mask_1[None, :, None, None] | _mask_2[None, None, :, None])
+                tl.store(_out + (_block_idx_0[:, None, None, None] * _out_stride_0 + _block_idx_1[None, :, None, None] * _out_stride_1 + _block_idx_2[None, None, :, None] * _out_stride_2 + _block_idx_3[None, None, None, :] * _out_stride_3), _v_0, _mask_0[:, None, None, None] & _mask_1[None, :, None, None] & _mask_2[None, None, :, None])
 
 def device_loop_3d(x: torch.Tensor):
     out = torch.empty_like(x)
@@ -178,9 +178,9 @@ def _device_loop_3d_kernel(_x, _out, _out_stride_0, _out_stride_1, _out_stride_2
         _block_idx_1 = _offsets_1_2_3 // _c % _b
         _block_idx_3 = _offsets_1_2_3 // (_b * _c)
         _mask_1_2_3 = _offsets_1_2_3 < _b * _c * _d
-        _load = tl.load(_x + (_block_idx_0[:, None] * _x_stride_0 + _block_idx_1[None, :] * _x_stride_1 + _block_idx_2[None, :] * _x_stride_2 + _block_idx_3[None, :] * _x_stride_3), _mask_0[:, None] | _mask_1_2_3[None, :], other=0)
+        _load = tl.load(_x + (_block_idx_0[:, None] * _x_stride_0 + _block_idx_1[None, :] * _x_stride_1 + _block_idx_2[None, :] * _x_stride_2 + _block_idx_3[None, :] * _x_stride_3), _mask_0[:, None] & _mask_1_2_3[None, :], other=0)
         _v_0 = tl_math.sin(_load)
-        tl.store(_out + (_block_idx_0[:, None] * _out_stride_0 + _block_idx_1[None, :] * _out_stride_1 + _block_idx_2[None, :] * _out_stride_2 + _block_idx_3[None, :] * _out_stride_3), _v_0, _mask_0[:, None] | _mask_1_2_3[None, :])
+        tl.store(_out + (_block_idx_0[:, None] * _out_stride_0 + _block_idx_1[None, :] * _out_stride_1 + _block_idx_2[None, :] * _out_stride_2 + _block_idx_3[None, :] * _out_stride_3), _v_0, _mask_0[:, None] & _mask_1_2_3[None, :])
 
 def device_loop_3d(x: torch.Tensor):
     out = torch.empty_like(x)

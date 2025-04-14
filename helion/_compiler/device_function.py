@@ -11,12 +11,14 @@ from typing import cast
 import sympy
 import torch
 from torch._inductor.codegen.triton import texpr
+from torch.fx.graph import _Namespace
 
 from .ast_extension import create
 from .ast_extension import create_arg
 from .ast_extension import create_arguments
 from .ast_extension import expr_from_string
 from .ast_extension import statement_from_string
+from .ast_read_writes import ast_rename
 from .compile_environment import CompileEnvironment
 from .host_function import HostFunction
 from .tile_strategy import TileStrategyDispatch
@@ -116,6 +118,16 @@ class DeviceFunction:
         )
         self.tile_strategy: TileStrategyDispatch = TileStrategyDispatch(self, config)
         self.grid_expr: ast.AST | None = None
+        self.namespace: _Namespace = _Namespace()
+        self._variable_renames: dict[str, list[str]] = {}
+
+    def merge_variable_names(self, a: str, b: str) -> None:
+        name_group = [
+            *self._variable_renames.get(a, [a]),
+            *self._variable_renames.get(b, [b]),
+        ]
+        for n in name_group:
+            self._variable_renames[n] = name_group
 
     def set_grid_expr(self, grid_expr: ast.AST) -> None:
         assert self.grid_expr is None, "grid_expr already set"
@@ -215,13 +227,18 @@ class DeviceFunction:
         return self.arguments
 
     def codegen_function_def(self) -> ast.FunctionDef:
-        return create(
-            ast.FunctionDef,
-            name=self.name,
-            args=create_arguments([arg.arg_def_node() for arg in self.sorted_args()]),
-            body=self.body,
-            decorator_list=[expr_from_string("triton.jit")],
-            type_params=[],
+        return ast_rename(
+            create(
+                ast.FunctionDef,
+                name=self.name,
+                args=create_arguments(
+                    [arg.arg_def_node() for arg in self.sorted_args()]
+                ),
+                body=self.body,
+                decorator_list=[expr_from_string("triton.jit")],
+                type_params=[],
+            ),
+            {k: v[0] for k, v in self._variable_renames.items()},
         )
 
     def codegen_function_call(self) -> ast.AST:

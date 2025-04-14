@@ -21,6 +21,7 @@ from ..language._decorators import args_to_proxies
 from ..language._tracing_ops import _for_loop
 from ..language._tracing_ops import _get_symnode
 from ..language._tracing_ops import _host_tensor
+from ..language._tracing_ops import _phi
 from .ast_extension import ExtendedAST
 from .ast_extension import LoopType
 from .ast_extension import NodeVisitor
@@ -47,9 +48,9 @@ if TYPE_CHECKING:
 
 def _make_fx(fn: Callable[..., object], *args: object) -> torch.fx.GraphModule:
     """
-    We monkey patch get_proxy_slot to support SymInt/SymFloat/SymBool
-    in the graph without any origin for them.  We instead insert
-    symnode_dummy_origin() in the graph which are ignored in codegen.
+    We monkey patch get_proxy_slot to support Tensor/SymInt/SymFloat/SymBool in the
+    graph without any origin for them.  We instead insert _host_tensor(), _get_symnode()
+    in the graph to originate them.
     """
 
     def _get_proxy_slot(
@@ -116,10 +117,15 @@ class GraphInfo:
     def __str__(self) -> str:
         output = self.graph.print_readable(print_output=False).strip()
         return textwrap.dedent(
-            re.sub("^[^\n]+\n", "", output).replace("forward(self)", f"{self.name}()")
+            re.sub(
+                r"forward\(self,? ?([^)]*)\)",
+                rf"{self.name}(\1)",
+                # remove `class <lambda>():` from the output
+                re.sub("^[^\n]+\n", "", output),
+            )
         )
 
-    def codegen(self, state: CodegenState) -> None:
+    def codegen(self, state: CodegenState) -> list[object]:
         raise NotImplementedError
 
 
@@ -131,7 +137,7 @@ class RootGraphInfo(GraphInfo):
 class ForLoopGraphInfo(GraphInfo):
     block_indices: list[int]
 
-    def codegen(self, state: CodegenState) -> None:
+    def codegen(self, state: CodegenState) -> list[object]:
         for_node, statements = state.device_function.tile_strategy.codegen_device_loop(
             state, self.block_indices
         )
@@ -139,12 +145,13 @@ class ForLoopGraphInfo(GraphInfo):
         assert isinstance(args, list)
         assert all(isinstance(x, ast.AST) for x in args)
         with state.codegen.set_statements(statements):
-            codegen_call_with_graph(
+            output = codegen_call_with_graph(
                 state.codegen,
                 self.graph,
                 args,
             )
         state.add_statement(for_node)
+        return output
 
 
 class DeviceIR:
@@ -283,8 +290,16 @@ class WalkDeviceAST(NodeVisitor):
                     constant=None,
                     tracer=tracer,
                 )
-            # TODO(jansel): need to generate phi nodes for any mutated variables
-            self.scope.update(outputs.unflatten())
+            for name, value in outputs.unflatten().items():
+                if name in self.scope:
+                    try:
+                        self.scope[name] = _phi(self.scope[name], value)
+                    except Exception as e:
+                        raise exc.CantCombineTypesInControlFlow(
+                            name, self.scope[name], value
+                        ) from e
+                else:
+                    self.scope[name] = value
         else:
             raise AssertionError(f"Unexpected loop type {node._loop_type}")
 

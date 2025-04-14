@@ -56,3 +56,29 @@ def _for_loop(graph_id: int, args: list[object]) -> list[object]:
 @_decorators.codegen(_for_loop)
 def _(state: CodegenState) -> None:
     return HostFunction.current().device_ir.graphs[state.proxy_arg(0)].codegen(state)
+
+
+@_decorators.api()
+def _phi(lhs: object, rhs: object) -> object:
+    """Combine values from different branches of a control flow."""
+    raise AssertionError("this should never be called")
+
+
+@_decorators.register_fake(_phi)
+def _(lhs: object, rhs: object) -> object:
+    assert isinstance(lhs, torch.Tensor), lhs
+    assert isinstance(rhs, torch.Tensor), rhs
+    assert lhs.size() == rhs.size()
+    assert lhs.dtype == rhs.dtype
+    assert lhs.device == rhs.device
+    return torch.empty_like(lhs)
+
+
+@_decorators.codegen(_phi)
+def _(state: CodegenState) -> ast.Name:
+    lhs = state.ast_arg(0)
+    assert isinstance(lhs, ast.Name), lhs
+    rhs = state.ast_arg(1)
+    assert isinstance(rhs, ast.Name), rhs
+    state.device_function.merge_variable_names(lhs.id, rhs.id)
+    return lhs

@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import functools
+from operator import getitem
 from typing import TYPE_CHECKING
+from typing import Callable
 from typing import NamedTuple
 
 import sympy
 import torch
 from torch._dynamo.convert_frame import compile_lock
+from torch._inductor import config as inductor_config
+from torch._inductor.codegen.simd import SIMDKernelFeatures
+from torch._inductor.codegen.triton import TritonKernel
 from torch._inductor.codegen.triton import TritonOverrides
 from torch._inductor.graph import GraphLowering
 from torch._inductor.ir import ComputedBuffer
@@ -37,6 +43,8 @@ if TYPE_CHECKING:
     from .device_function import DeviceFunction
     from .generate_ast import GenerateAST
     from .tile_strategy import TileStrategyDispatch
+
+    CodegenHandler = Callable[["GraphInterpreter", torch.fx.Node], object]
 
 
 def prepare_graph_lowerings(gm: torch.fx.GraphModule) -> None:
@@ -69,8 +77,14 @@ def prepare_node_lowering(
         APIFuncLowering.normalize_args_kwargs(api, node)
         return APIFuncLowering(api)
 
+    if node.target in aten_lowering_dispatch:
+        return aten_lowering_dispatch[node.target]()
+
     def convert_arg(arg: Node) -> TensorBox:
         example = arg.meta["val"]
+        assert isinstance(example, torch.Tensor), (
+            f"Expected Tensor, got {type(example)}: {node.target}"
+        )
         input_names.append(name := f"{node.name}_input{len(input_names)}")
         return TensorBox.create(
             InputBuffer(
@@ -142,12 +156,30 @@ class InductorLowering(Lowering):
         )
 
 
+@functools.cache
+def dummy_gm() -> torch.fx.GraphModule:
+    return torch.fx.symbolic_trace(lambda: None)
+
+
 class PointwiseLowering(InductorLowering):
     def codegen(self, ctx: GraphInterpreter, node: torch.fx.Node) -> object:
-        # pyre-ignore[19]
-        with V.set_ops_handler(
-            GenerateASTFromInductor(
-                ctx.cg, dict(zip(self.input_names, self.input_asts(ctx, node)))
+        with (
+            inductor_config.patch("triton.codegen_upcast_to_fp32", False),
+            # pyre-ignore[19]
+            V.set_graph_handler(
+                GraphLowering(
+                    dummy_gm(), shape_env=CompileEnvironment.current().shape_env
+                )
+            ),
+            # pyre-ignore[19]
+            V.set_ops_handler(
+                GenerateASTFromInductor(
+                    ctx.cg, dict(zip(self.input_names, self.input_asts(ctx, node)))
+                )
+            ),
+            # pyre-ignore[19]
+            V.set_kernel_handler(
+                TritonKernel({}, features=SIMDKernelFeatures([], sympy.S.One))
             ),
         ):
             indices = [
@@ -193,6 +225,57 @@ class APIFuncLowering(Lowering):
         node.kwargs = {}
 
 
+@dataclasses.dataclass
+class LambdaLowering(Lowering):
+    fn: Callable[..., object]
+
+    def codegen(self, ctx: GraphInterpreter, node: torch.fx.Node) -> object:
+        return self.fn(ctx, node)
+
+
+aten_lowering_dispatch: dict[object, Callable[[], Lowering]] = {}
+
+
+def register_lowering(
+    fn: object,
+) -> Callable[[CodegenHandler], CodegenHandler]:
+    def decorator(handler: CodegenHandler) -> CodegenHandler:
+        assert fn not in aten_lowering_dispatch, f"Lowering for {fn} already registered"
+        aten_lowering_dispatch[fn] = lambda: LambdaLowering(handler)
+        return handler
+
+    return decorator
+
+
+# pyre-fixme[56]
+@register_lowering(torch.ops.aten.mm.default)
+def codegen_matmul(ctx: GraphInterpreter, node: torch.fx.Node) -> ast.AST:
+    assert not node.kwargs, "matmul kwargs not supported"
+    lhs, rhs = map_arg(node.args, lambda arg: ctx.env[arg])
+    assert isinstance(lhs, ast.AST)
+    assert isinstance(rhs, ast.AST)
+    return expr_from_string("tl.dot(lhs, rhs)", lhs=lhs, rhs=rhs)
+
+
+# pyre-fixme[56]
+@register_lowering(torch.ops.aten.sym_size.int)
+def codegen_sym_size(ctx: GraphInterpreter, node: torch.fx.Node) -> object:
+    val = node.meta["val"]
+    assert isinstance(
+        val, (int, float, bool, torch.SymInt, torch.SymBool, torch.SymFloat)
+    )
+    return val
+
+
+@register_lowering(getitem)
+def codegen_getitem(ctx: GraphInterpreter, node: torch.fx.Node) -> object:
+    assert not node.kwargs, "getitem kwargs not supported"
+    lhs, rhs = map_arg(node.args, lambda arg: ctx.env[arg])
+    assert isinstance(lhs, (list, tuple))
+    assert isinstance(rhs, int)
+    return lhs[rhs]
+
+
 class GenerateASTFromInductor(DefaultHandler):
     def __init__(self, cg: GenerateAST, input_name_lookup: dict[str, ast.AST]) -> None:
         super().__init__()
@@ -233,9 +316,6 @@ class GraphInterpreter(Interpreter):
                 if result is None:
                     return None
                 if not isinstance(result, ast.AST):
-                    assert isinstance(
-                        result, (int, torch.SymInt, torch.SymFloat, torch.SymBool)
-                    )
                     return result
                 assert isinstance(result, ast.expr)
                 if len(n.users) > 0:
@@ -254,9 +334,9 @@ class GraphInterpreter(Interpreter):
 
 def codegen_call_with_graph(
     cg: GenerateAST, gm: torch.fx.GraphModule, args: list[ast.AST]
-) -> None:
+) -> list[object]:
     with compile_lock:
-        GraphInterpreter(gm, cg).run(*args)
+        return GraphInterpreter(gm, cg).run(*args)
 
 
 class CodegenState(NamedTuple):

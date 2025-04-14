@@ -14,7 +14,9 @@ from typing import cast
 
 import torch
 from torch.fx.experimental import proxy_tensor
+from torch.utils._pytree import tree_map
 from torch.utils._pytree import tree_map_only
+from torch.utils._thunk import Thunk
 
 from helion import exc
 from helion._compiler.compile_environment import CompileEnvironment
@@ -63,14 +65,19 @@ def args_to_proxies(
     args: _T,
     kwargs: dict[str, object] | None = None,
 ) -> tuple[_T, dict[str, object]]:
-    return tree_map_only(
-        proxy_tensor._ProxyTensor,
-        lambda x: x.proxy,
-        tree_map_only(
-            (torch.Tensor, torch.SymInt, torch.SymBool, torch.SymFloat),
-            functools.partial(proxy_tensor.get_proxy_slot, tracer=tracer),
-            (args, kwargs or {}),
-        ),
+    def unpack(x: object) -> object:
+        if isinstance(x, (torch.Tensor, torch.SymInt, torch.SymBool, torch.SymFloat)):
+            # pyre-ignore[6]
+            return unpack(proxy_tensor.get_proxy_slot(x, tracer=tracer))
+        if isinstance(x, proxy_tensor._ProxyTensor):
+            return x.proxy
+        if isinstance(x, Thunk):
+            return x.force()
+        return x
+
+    return tree_map(
+        unpack,
+        (args, kwargs or {}),
     )
 
 

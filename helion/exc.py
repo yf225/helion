@@ -135,6 +135,10 @@ class TracedArgNotSupported(BaseError):
     message = "{!s} is not supported as an arg to traced functions."
 
 
+class CantCombineTypesInControlFlow(BaseError):
+    message = "Cannot combine types for {0!r} in control flow: {1} and {2}"
+
+
 class TypePropagationError(BaseError):
     message = "{}"
 

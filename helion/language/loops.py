@@ -121,6 +121,4 @@ def _(state: CodegenState) -> ast.AST:
             state, [t.block_size_idx for t in tile_indices]
         )
         return expr_from_string("None")
-    if loop_type == LoopType.DEVICE:
-        raise NotImplementedError("TODO: implement tile() for device loops")
     raise AssertionError(f"Expected loop type: {loop_type}")
