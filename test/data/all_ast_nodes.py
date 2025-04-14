@@ -106,7 +106,7 @@ def all_ast_nodes(x, y):
     assert x is not y, "msg"
     del add
 
-    import torch
+    import torch as torch2
     from torch import Tensor
 
     if x is y:

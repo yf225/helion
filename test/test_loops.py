@@ -41,16 +41,15 @@ class TestLoops(TestCase):
             """\
 import torch
 import triton
-from triton import language as tl
-from torch._inductor.runtime.triton_helpers import math as tl_math
+import triton.language as tl
 
 @triton.jit
-def _pointwise_device_loop_kernel(x, out, out_stride_0, out_stride_1, x_stride_0, x_stride_1, n, m, BLOCK_SIZE_0: tl.constexpr, BLOCK_SIZE_1: tl.constexpr):
+def _pointwise_device_loop_kernel(x, out, out_stride_0, out_stride_1, x_stride_0, x_stride_1, n, m, _BLOCK_SIZE_0: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr):
     pid_0 = tl.program_id(0)
-    block_idx_0 = pid_0 * BLOCK_SIZE_0 + tl.arange(0, BLOCK_SIZE_0).to(tl.int32)
+    block_idx_0 = pid_0 * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
     mask_0 = block_idx_0 < n
-    for start_1 in range(0, m, BLOCK_SIZE_1):
-        block_idx_1 = start_1 + tl.arange(0, BLOCK_SIZE_1).to(tl.int32)
+    for start_1 in range(0, m, _BLOCK_SIZE_1):
+        block_idx_1 = start_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
         mask_1 = block_idx_1 < m
         load = tl.load(x + (block_idx_0[:, None] * x_stride_0 + block_idx_1[None, :] * x_stride_1), mask_0[:, None] & mask_1[None, :], other=0)
         v_0 = 1.0
@@ -61,9 +60,9 @@ def _pointwise_device_loop_kernel(x, out, out_stride_0, out_stride_1, x_stride_0
 def pointwise_device_loop(x: torch.Tensor):
     out = torch.empty_like(x)
     n, m = x.shape
-    BLOCK_SIZE_0 = 32
-    BLOCK_SIZE_1 = 32
-    _pointwise_device_loop_kernel[triton.cdiv(n, BLOCK_SIZE_0),](x, out, out.stride(0), out.stride(1), x.stride(0), x.stride(1), n, m, BLOCK_SIZE_0, BLOCK_SIZE_1, num_warps=4, num_stages=3)
+    _BLOCK_SIZE_0 = 32
+    _BLOCK_SIZE_1 = 32
+    _pointwise_device_loop_kernel[triton.cdiv(n, _BLOCK_SIZE_0),](x, out, out.stride(0), out.stride(1), x.stride(0), x.stride(1), n, m, _BLOCK_SIZE_0, _BLOCK_SIZE_1, num_warps=4, num_stages=3)
     return out""",
         )
 
@@ -80,21 +79,21 @@ def pointwise_device_loop(x: torch.Tensor):
             """\
 import torch
 import triton
-from triton import language as tl
+import triton.language as tl
 from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
-def _device_loop_3d_kernel(x, out, out_stride_0, out_stride_1, out_stride_2, out_stride_3, x_stride_0, x_stride_1, x_stride_2, x_stride_3, d, c, b, BLOCK_SIZE_3: tl.constexpr, BLOCK_SIZE_2: tl.constexpr, BLOCK_SIZE_1: tl.constexpr):
+def _device_loop_3d_kernel(x, out, out_stride_0, out_stride_1, out_stride_2, out_stride_3, x_stride_0, x_stride_1, x_stride_2, x_stride_3, d, c, b, _BLOCK_SIZE_3: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr):
     pid_0 = tl.program_id(0)
     block_idx_0 = pid_0 + tl.zeros([1], tl.int32)
-    for start_1 in range(0, b, BLOCK_SIZE_1):
-        block_idx_1 = start_1 + tl.arange(0, BLOCK_SIZE_1).to(tl.int32)
+    for start_1 in range(0, b, _BLOCK_SIZE_1):
+        block_idx_1 = start_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
         mask_1 = block_idx_1 < b
-        for start_2 in range(0, c, BLOCK_SIZE_2):
-            block_idx_2 = start_2 + tl.arange(0, BLOCK_SIZE_2).to(tl.int32)
+        for start_2 in range(0, c, _BLOCK_SIZE_2):
+            block_idx_2 = start_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
             mask_2 = block_idx_2 < c
-            for start_3 in range(0, d, BLOCK_SIZE_3):
-                block_idx_3 = start_3 + tl.arange(0, BLOCK_SIZE_3).to(tl.int32)
+            for start_3 in range(0, d, _BLOCK_SIZE_3):
+                block_idx_3 = start_3 + tl.arange(0, _BLOCK_SIZE_3).to(tl.int32)
                 mask_3 = block_idx_3 < d
                 load = tl.load(x + (block_idx_0[:, None, None, None] * x_stride_0 + block_idx_1[None, :, None, None] * x_stride_1 + block_idx_2[None, None, :, None] * x_stride_2 + block_idx_3[None, None, None, :] * x_stride_3), mask_1[None, :, None, None] & mask_2[None, None, :, None] & mask_3[None, None, None, :], other=0)
                 v_0 = tl_math.sin(load)
@@ -103,10 +102,10 @@ def _device_loop_3d_kernel(x, out, out_stride_0, out_stride_1, out_stride_2, out
 def device_loop_3d(x: torch.Tensor):
     out = torch.empty_like(x)
     a, b, c, d = x.shape
-    BLOCK_SIZE_3 = 8
-    BLOCK_SIZE_2 = 8
-    BLOCK_SIZE_1 = 8
-    _device_loop_3d_kernel[a,](x, out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), x.stride(0), x.stride(1), x.stride(2), x.stride(3), d, c, b, BLOCK_SIZE_3, BLOCK_SIZE_2, BLOCK_SIZE_1, num_warps=4, num_stages=3)
+    _BLOCK_SIZE_3 = 8
+    _BLOCK_SIZE_2 = 8
+    _BLOCK_SIZE_1 = 8
+    _device_loop_3d_kernel[a,](x, out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), x.stride(0), x.stride(1), x.stride(2), x.stride(3), d, c, b, _BLOCK_SIZE_3, _BLOCK_SIZE_2, _BLOCK_SIZE_1, num_warps=4, num_stages=3)
     return out""",
         )
 
@@ -124,19 +123,19 @@ def device_loop_3d(x: torch.Tensor):
             """\
 import torch
 import triton
-from triton import language as tl
+import triton.language as tl
 from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
-def _device_loop_3d_kernel(x, out, out_stride_0, out_stride_1, out_stride_2, out_stride_3, x_stride_0, x_stride_1, x_stride_2, x_stride_3, a, d, b, c, BLOCK_SIZE_0: tl.constexpr, BLOCK_SIZE_1: tl.constexpr, BLOCK_SIZE_2: tl.constexpr):
+def _device_loop_3d_kernel(x, out, out_stride_0, out_stride_1, out_stride_2, out_stride_3, x_stride_0, x_stride_1, x_stride_2, x_stride_3, a, d, b, c, _BLOCK_SIZE_0: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr):
     pid_0 = tl.program_id(0)
-    block_idx_0 = pid_0 * BLOCK_SIZE_0 + tl.arange(0, BLOCK_SIZE_0).to(tl.int32)
+    block_idx_0 = pid_0 * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
     mask_0 = block_idx_0 < a
-    for start_2 in range(0, c, BLOCK_SIZE_2):
-        block_idx_2 = start_2 + tl.arange(0, BLOCK_SIZE_2).to(tl.int32)
+    for start_2 in range(0, c, _BLOCK_SIZE_2):
+        block_idx_2 = start_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
         mask_2 = block_idx_2 < c
-        for start_1 in range(0, b, BLOCK_SIZE_1):
-            block_idx_1 = start_1 + tl.arange(0, BLOCK_SIZE_1).to(tl.int32)
+        for start_1 in range(0, b, _BLOCK_SIZE_1):
+            block_idx_1 = start_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
             mask_1 = block_idx_1 < b
             for start_3 in range(0, d, 1):
                 block_idx_3 = start_3 + tl.arange(0, 1).to(tl.int32)
@@ -147,10 +146,10 @@ def _device_loop_3d_kernel(x, out, out_stride_0, out_stride_1, out_stride_2, out
 def device_loop_3d(x: torch.Tensor):
     out = torch.empty_like(x)
     a, b, c, d = x.shape
-    BLOCK_SIZE_0 = 2
-    BLOCK_SIZE_1 = 8
-    BLOCK_SIZE_2 = 4
-    _device_loop_3d_kernel[triton.cdiv(a, BLOCK_SIZE_0),](x, out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), x.stride(0), x.stride(1), x.stride(2), x.stride(3), a, d, b, c, BLOCK_SIZE_0, BLOCK_SIZE_1, BLOCK_SIZE_2, num_warps=4, num_stages=3)
+    _BLOCK_SIZE_0 = 2
+    _BLOCK_SIZE_1 = 8
+    _BLOCK_SIZE_2 = 4
+    _device_loop_3d_kernel[triton.cdiv(a, _BLOCK_SIZE_0),](x, out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), x.stride(0), x.stride(1), x.stride(2), x.stride(3), a, d, b, c, _BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2, num_warps=4, num_stages=3)
     return out""",
         )
 
@@ -168,16 +167,16 @@ def device_loop_3d(x: torch.Tensor):
             """\
 import torch
 import triton
-from triton import language as tl
+import triton.language as tl
 from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
-def _device_loop_3d_kernel(x, out, out_stride_0, out_stride_1, out_stride_2, out_stride_3, x_stride_0, x_stride_1, x_stride_2, x_stride_3, a, c, b, d, BLOCK_SIZE_0: tl.constexpr, BLOCK_SIZE_1_2_3: tl.constexpr):
+def _device_loop_3d_kernel(x, out, out_stride_0, out_stride_1, out_stride_2, out_stride_3, x_stride_0, x_stride_1, x_stride_2, x_stride_3, a, c, b, d, _BLOCK_SIZE_0: tl.constexpr, _BLOCK_SIZE_1_2_3: tl.constexpr):
     pid_0 = tl.program_id(0)
-    block_idx_0 = pid_0 * BLOCK_SIZE_0 + tl.arange(0, BLOCK_SIZE_0).to(tl.int32)
+    block_idx_0 = pid_0 * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
     mask_0 = block_idx_0 < a
-    for lid_1_2_3 in range(tl.cdiv(b * c * d, BLOCK_SIZE_1_2_3)):
-        offsets_1_2_3 = lid_1_2_3 * BLOCK_SIZE_1_2_3 + tl.arange(0, BLOCK_SIZE_1_2_3).to(tl.int32)
+    for lid_1_2_3 in range(tl.cdiv(b * c * d, _BLOCK_SIZE_1_2_3)):
+        offsets_1_2_3 = lid_1_2_3 * _BLOCK_SIZE_1_2_3 + tl.arange(0, _BLOCK_SIZE_1_2_3).to(tl.int32)
         block_idx_2 = offsets_1_2_3 % c
         block_idx_1 = offsets_1_2_3 // c % b
         block_idx_3 = offsets_1_2_3 // (b * c)
@@ -189,8 +188,8 @@ def _device_loop_3d_kernel(x, out, out_stride_0, out_stride_1, out_stride_2, out
 def device_loop_3d(x: torch.Tensor):
     out = torch.empty_like(x)
     a, b, c, d = x.shape
-    BLOCK_SIZE_0 = 4
-    BLOCK_SIZE_1_2_3 = 128
-    _device_loop_3d_kernel[triton.cdiv(a, BLOCK_SIZE_0),](x, out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), x.stride(0), x.stride(1), x.stride(2), x.stride(3), a, c, b, d, BLOCK_SIZE_0, BLOCK_SIZE_1_2_3, num_warps=4, num_stages=3)
+    _BLOCK_SIZE_0 = 4
+    _BLOCK_SIZE_1_2_3 = 128
+    _device_loop_3d_kernel[triton.cdiv(a, _BLOCK_SIZE_0),](x, out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), x.stride(0), x.stride(1), x.stride(2), x.stride(3), a, c, b, d, _BLOCK_SIZE_0, _BLOCK_SIZE_1_2_3, num_warps=4, num_stages=3)
     return out""",
         )

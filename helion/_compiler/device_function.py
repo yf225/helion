@@ -21,7 +21,7 @@ from .ast_extension import statement_from_string
 from .ast_read_writes import ast_rename
 from .compile_environment import CompileEnvironment
 from .host_function import HostFunction
-from .tile_strategy import TileStrategyDispatch
+from .output_header import reserved_names
 from .variable_origin import BlockSizeOrigin
 from .variable_origin import Origin
 from .variable_origin import TensorSizeOrigin
@@ -118,11 +118,14 @@ class DeviceFunction:
         )
         self.grid_expr: ast.AST | None = None
         self.namespace: _Namespace = _Namespace()
-        self.namespace._used_names.update(
-            ["hl", "tl", "helion", "triton", "torch", "tl_math"]
-        )
+        self.namespace._used_names.update(reserved_names())
         self._variable_renames: dict[str, list[str]] = {}
+
+        from .indexing_strategy import IndexingStrategy
+        from .tile_strategy import TileStrategyDispatch
+
         self.tile_strategy: TileStrategyDispatch = TileStrategyDispatch(self, config)
+        self.indexing_strategy: IndexingStrategy = IndexingStrategy.select(self, config)
 
     def merge_variable_names(self, a: str, b: str) -> None:
         name_group = [

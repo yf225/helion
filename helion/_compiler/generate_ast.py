@@ -22,14 +22,6 @@ if TYPE_CHECKING:
     from .host_function import HostFunction
     from .type_propagation import TensorType
 
-OUTPUT_CODE_HEADER = """\
-import torch
-import triton
-from triton import language as tl
-from torch._inductor.runtime.triton_helpers import math as tl_math
-
-"""
-
 
 class GenerateAST(NodeVisitor):
     def __init__(self, func: HostFunction, config: Config) -> None:

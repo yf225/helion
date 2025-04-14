@@ -128,7 +128,7 @@ class FlattenedTileStrategy(TileStrategy):
         super().__init__(fn, block_indices, spec, block_size, loop_order)
         # TODO(jansel): optimize away unneeded masks and return None
         self._mask_var: str = self.new_var("mask")
-        self._block_size_var: str = self.new_var("BLOCK_SIZE")
+        self._block_size_var: str = self.new_var("_BLOCK_SIZE")
 
     def new_var(self, prefix: str) -> str:
         return self.fn.new_var(f"{prefix}_{'_'.join(map(str, self.block_indices))}")
@@ -314,8 +314,9 @@ class NDTileStrategy(TileStrategy):
                 mask_var = self.fn.new_var(f"mask_{block_idx}")
                 self.mask_vars[block_idx] = mask_var
                 self.block_size_vars[block_idx] = block_size_var = device_fn.new_var(
-                    f"BLOCK_SIZE_{block_idx}"
+                    f"_BLOCK_SIZE_{block_idx}"
                 )
+                # TODO(jansel): need to check for conflict with user variable names since block_size_var is on host
                 state.codegen.host_statements.append(
                     statement_from_string(f"{block_size_var} = {block_size!r}")
                 )
@@ -359,7 +360,7 @@ class NDTileStrategy(TileStrategy):
             start_var = self.fn.new_var(f"start_{block_idx}")
             if block_size != 1:
                 self.block_size_vars[block_idx] = block_size_var = device_fn.new_var(
-                    f"BLOCK_SIZE_{block_idx}"
+                    f"_BLOCK_SIZE_{block_idx}"
                 )
                 state.device_function.constexpr_arg(block_size_var)
                 state.codegen.host_statements.append(

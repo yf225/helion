@@ -13,9 +13,10 @@ from torch._inductor.codecache import PyCodeCache
 
 from .. import exc
 from .._compiler.compile_environment import CompileEnvironment
-from .._compiler.generate_ast import OUTPUT_CODE_HEADER
 from .._compiler.generate_ast import generate_ast
 from .._compiler.host_function import HostFunction
+from .._compiler.output_header import assert_no_conflicts
+from .._compiler.output_header import get_needed_imports
 from .config import Config
 from .settings import Settings
 
@@ -38,6 +39,7 @@ class Kernel:
         :param settings: The settings to be used by the Kernel. If None, default settings are used.
         """
         super().__init__()
+        assert_no_conflicts(fn)
         self.name: str = fn.__name__
         self.fn = fn
         self.signature: inspect.Signature = inspect.signature(fn)
@@ -127,7 +129,8 @@ class BoundKernel:
         with self.env:
             config = Config(config)
             self.env.config_spec.normalize(config)
-            return OUTPUT_CODE_HEADER + ast.unparse(generate_ast(self.host_fn, config))
+            root = generate_ast(self.host_fn, config)
+            return get_needed_imports(root) + ast.unparse(root)
 
     def compile_config(self, config: ConfigLike) -> Callable[..., object]:
         module = PyCodeCache.load(self.to_triton_code(config))

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from collections.abc import Mapping
+from typing import Literal
 from typing import cast
 
 from helion.autotuner.config_spec import DEFAULT_NUM_STAGES
 from helion.autotuner.config_spec import DEFAULT_NUM_WARPS
+
+IndexingLiteral = Literal["pointer", "tensor_descriptor", "block_ptr"]
 
 
 class Config(Mapping[str, object]):
@@ -63,3 +66,7 @@ class Config(Mapping[str, object]):
     @property
     def use_yz_grid(self) -> int:
         return cast("bool", self.config.get("use_yz_grid", False))
+
+    @property
+    def indexing(self) -> IndexingLiteral:
+        return cast("IndexingLiteral", self.config.get("indexing", "pointer"))

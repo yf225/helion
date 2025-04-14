@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from .. import exc
+from .ast_read_writes import ast_read_writes
+
+if TYPE_CHECKING:
+    import ast
+    from types import FunctionType
+
+OUTPUT_CODE_HEADER = """\
+import torch
+import triton
+from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
+from triton.tools.experimental_descriptor import TensorDescriptor
+
+"""
+
+library_imports: dict[str, str] = {
+    "torch": "import torch",
+    "helion": "import helion",
+    "hl": "import helion.language as hl",
+    "triton": "import triton",
+    "tl": "import triton.language as tl",
+    "tl_math": "from torch._inductor.runtime.triton_helpers import math as tl_math",
+    "TensorDescriptor": "from triton.tools.experimental_descriptor import TensorDescriptor",
+}
+
+
+def get_needed_imports(root: ast.AST) -> str:
+    """
+    Generate the necessary import statements based on the variables read in the given AST.
+
+    This function analyzes the provided Abstract Syntax Tree (AST) to determine which
+    library imports are required based on the variables that are read. It then constructs
+    and returns the corresponding import statements.
+
+    :param root: The root AST node to analyze.
+    :return: A string containing the required import statements, separated by newlines.
+    """
+    rw = ast_read_writes(root)
+    result = [library_imports[name] for name in library_imports if name in rw.reads]
+    return "\n".join(result) + "\n\n"
+
+
+def assert_no_conflicts(fn: FunctionType) -> None:
+    """
+    Check for naming conflicts between the function's arguments and reserved names.
+
+    This function verifies that the names used in the provided function do
+    not conflict with any reserved names used in the library imports. If
+    a conflict is found, an exception is raised.
+
+    :param fn: The function to check for naming conflicts.
+    :raises helion.exc.NamingConflict: If a naming conflict is detected.
+    """
+    for name in fn.__code__.co_varnames:
+        if name in library_imports:
+            raise exc.NamingConflict(name)
+    for name in fn.__code__.co_names:
+        if name in library_imports and name in fn.__globals__:
+            user_val = fn.__globals__[name]
+            scope = {}
+            exec(library_imports[name], scope)
+            our_val = scope[name]
+            if user_val is not our_val:
+                raise exc.NamingConflict(name)
+
+
+def reserved_names() -> list[str]:
+    """
+    Retrieve a list of reserved names used in the library imports.
+    """
+    return [*library_imports]

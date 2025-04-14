@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import dataclasses
 import threading
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
+from typing import Literal
 from typing import Protocol
 from typing import cast
 

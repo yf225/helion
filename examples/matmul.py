@@ -7,7 +7,9 @@ import helion.language as hl
 
 
 @helion.kernel
-def matmul(x: torch.Tensor, y: torch.Tensor, acc_dtype=torch.float32) -> torch.Tensor:
+def matmul(
+    x: torch.Tensor, y: torch.Tensor, acc_dtype: torch.dtype = torch.float32
+) -> torch.Tensor:
     m, k = x.size()
     k2, n = y.size()
     assert k == k2, f"size mismatch {k} != {k2}"

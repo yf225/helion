@@ -41,6 +41,10 @@ class NotInsideKernel(BaseError):
     )
 
 
+class NamingConflict(BaseError):
+    message = "The variable name {} is reserved in Helion and cannot be used."
+
+
 class LoopFunctionNotInFor(BaseError):
     message = "{0} must be called from a for loop, e.g. `for ... in {0}(...):"
 

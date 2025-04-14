@@ -58,6 +58,8 @@ class ConfigSpec:
             if 1 < len(self.block_size_specs[0]) <= 3:
                 config.setdefault("use_yz_grid", False)
 
+        config.setdefault("indexing", "pointer")
+
     def normalize_block_sizes(self, block_sizes: object) -> list[int | list[int]]:
         if len(self.block_size_specs) == 0:
             if block_sizes:
