@@ -86,9 +86,12 @@ from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
 def _matmul_kernel(x, y, out, out_stride_0, out_stride_1, x_stride_0, x_stride_1, y_stride_0, y_stride_1, m, n, k, BLOCK_SIZE_0: tl.constexpr, BLOCK_SIZE_1: tl.constexpr, BLOCK_SIZE_2: tl.constexpr):
-    block_idx_0 = tl.program_id(0) * BLOCK_SIZE_0 + tl.arange(0, BLOCK_SIZE_0).to(tl.int32)
+    num_blocks_0 = tl.cdiv(m, BLOCK_SIZE_0)
+    pid_0 = tl.program_id(0) % num_blocks_0
+    pid_1 = tl.program_id(0) // num_blocks_0
+    block_idx_0 = pid_0 * BLOCK_SIZE_0 + tl.arange(0, BLOCK_SIZE_0).to(tl.int32)
     mask_0 = block_idx_0 < m
-    block_idx_1 = tl.program_id(1) * BLOCK_SIZE_1 + tl.arange(0, BLOCK_SIZE_1).to(tl.int32)
+    block_idx_1 = pid_1 * BLOCK_SIZE_1 + tl.arange(0, BLOCK_SIZE_1).to(tl.int32)
     mask_1 = block_idx_1 < n
     acc = tl.full([BLOCK_SIZE_0, BLOCK_SIZE_1], 0.0, tl.float32)
     for start_2 in range(0, k, BLOCK_SIZE_2):
@@ -108,6 +111,62 @@ def matmul(x: torch.Tensor, y: torch.Tensor):
     BLOCK_SIZE_0 = 16
     BLOCK_SIZE_1 = 16
     BLOCK_SIZE_2 = 16
-    _matmul_kernel[triton.cdiv(m, BLOCK_SIZE_0), triton.cdiv(n, BLOCK_SIZE_1)](x, y, out, out.stride(0), out.stride(1), x.stride(0), x.stride(1), y.stride(0), y.stride(1), m, n, k, BLOCK_SIZE_0, BLOCK_SIZE_1, BLOCK_SIZE_2, num_warps=4, num_stages=3)
+    _matmul_kernel[triton.cdiv(m, BLOCK_SIZE_0) * triton.cdiv(n, BLOCK_SIZE_1),](x, y, out, out.stride(0), out.stride(1), x.stride(0), x.stride(1), y.stride(0), y.stride(1), m, n, k, BLOCK_SIZE_0, BLOCK_SIZE_1, BLOCK_SIZE_2, num_warps=4, num_stages=3)
+    return out""",
+        )
+
+    def test_matmul_l2_grouping(self):
+        args = (
+            torch.randn([128, 128], device=DEVICE, dtype=torch.float32),
+            torch.randn([128, 128], device=DEVICE, dtype=torch.float32),
+        )
+        self.assertExpectedInline(
+            run_example(
+                "matmul",
+                args,
+                args[0] @ args[1],
+                skip_accuracy=True,
+                block_sizes=[[16, 16], 16],
+                l2_grouping=8,
+            ),
+            """\
+import torch
+import triton
+from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
+
+@triton.jit
+def _matmul_kernel(x, y, out, out_stride_0, out_stride_1, x_stride_0, x_stride_1, y_stride_0, y_stride_1, m, n, k, BLOCK_SIZE_0: tl.constexpr, BLOCK_SIZE_1: tl.constexpr, BLOCK_SIZE_2: tl.constexpr):
+    num_pid_m = tl.cdiv(m, BLOCK_SIZE_0)
+    num_pid_n = tl.cdiv(n, BLOCK_SIZE_1)
+    num_pid_in_group = 8 * num_pid_n
+    group_id = tl.program_id(0) // num_pid_in_group
+    first_pid_m = group_id * 8
+    group_size_m = min(num_pid_m - first_pid_m, 8)
+    pid_0 = first_pid_m + tl.program_id(0) % num_pid_in_group % group_size_m
+    pid_1 = tl.program_id(0) % num_pid_in_group // group_size_m
+    block_idx_0 = pid_0 * BLOCK_SIZE_0 + tl.arange(0, BLOCK_SIZE_0).to(tl.int32)
+    mask_0 = block_idx_0 < m
+    block_idx_1 = pid_1 * BLOCK_SIZE_1 + tl.arange(0, BLOCK_SIZE_1).to(tl.int32)
+    mask_1 = block_idx_1 < n
+    acc = tl.full([BLOCK_SIZE_0, BLOCK_SIZE_1], 0.0, tl.float32)
+    for start_2 in range(0, k, BLOCK_SIZE_2):
+        block_idx_2 = start_2 + tl.arange(0, BLOCK_SIZE_2).to(tl.int32)
+        mask_2 = block_idx_2 < k
+        load = tl.load(x + (block_idx_0[:, None] * x_stride_0 + block_idx_2[None, :] * x_stride_1), mask_0[:, None] & mask_2[None, :], other=0)
+        load_1 = tl.load(y + (block_idx_2[:, None] * y_stride_0 + block_idx_1[None, :] * y_stride_1), mask_2[:, None] & mask_1[None, :], other=0)
+        mm = tl.dot(load, load_1)
+        acc = acc + mm
+    tl.store(out + (block_idx_0[:, None] * out_stride_0 + block_idx_1[None, :] * out_stride_1), acc, mask_0[:, None] & mask_1[None, :])
+
+def matmul(x: torch.Tensor, y: torch.Tensor):
+    m, k = x.size()
+    k2, n = y.size()
+    assert k == k2, f'size mismatch {k} != {k2}'
+    out = torch.empty([m, n], dtype=torch.promote_types(x.dtype, y.dtype), device=x.device)
+    BLOCK_SIZE_0 = 16
+    BLOCK_SIZE_1 = 16
+    BLOCK_SIZE_2 = 16
+    _matmul_kernel[triton.cdiv(m, BLOCK_SIZE_0) * triton.cdiv(n, BLOCK_SIZE_1),](x, y, out, out.stride(0), out.stride(1), x.stride(0), x.stride(1), y.stride(0), y.stride(1), m, n, k, BLOCK_SIZE_0, BLOCK_SIZE_1, BLOCK_SIZE_2, num_warps=4, num_stages=3)
     return out""",
         )

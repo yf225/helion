@@ -46,7 +46,8 @@ from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
 def _pointwise_device_loop_kernel(x, out, out_stride_0, out_stride_1, x_stride_0, x_stride_1, n, m, BLOCK_SIZE_0: tl.constexpr, BLOCK_SIZE_1: tl.constexpr):
-    block_idx_0 = tl.program_id(0) * BLOCK_SIZE_0 + tl.arange(0, BLOCK_SIZE_0).to(tl.int32)
+    pid_0 = tl.program_id(0)
+    block_idx_0 = pid_0 * BLOCK_SIZE_0 + tl.arange(0, BLOCK_SIZE_0).to(tl.int32)
     mask_0 = block_idx_0 < n
     for start_1 in range(0, m, BLOCK_SIZE_1):
         block_idx_1 = start_1 + tl.arange(0, BLOCK_SIZE_1).to(tl.int32)
@@ -84,7 +85,8 @@ from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
 def _device_loop_3d_kernel(x, out, out_stride_0, out_stride_1, out_stride_2, out_stride_3, x_stride_0, x_stride_1, x_stride_2, x_stride_3, d, c, b, BLOCK_SIZE_3: tl.constexpr, BLOCK_SIZE_2: tl.constexpr, BLOCK_SIZE_1: tl.constexpr):
-    block_idx_0 = tl.program_id(0) + tl.zeros([1], tl.int32)
+    pid_0 = tl.program_id(0)
+    block_idx_0 = pid_0 + tl.zeros([1], tl.int32)
     for start_1 in range(0, b, BLOCK_SIZE_1):
         block_idx_1 = start_1 + tl.arange(0, BLOCK_SIZE_1).to(tl.int32)
         mask_1 = block_idx_1 < b
@@ -127,7 +129,8 @@ from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
 def _device_loop_3d_kernel(x, out, out_stride_0, out_stride_1, out_stride_2, out_stride_3, x_stride_0, x_stride_1, x_stride_2, x_stride_3, a, d, b, c, BLOCK_SIZE_0: tl.constexpr, BLOCK_SIZE_1: tl.constexpr, BLOCK_SIZE_2: tl.constexpr):
-    block_idx_0 = tl.program_id(0) * BLOCK_SIZE_0 + tl.arange(0, BLOCK_SIZE_0).to(tl.int32)
+    pid_0 = tl.program_id(0)
+    block_idx_0 = pid_0 * BLOCK_SIZE_0 + tl.arange(0, BLOCK_SIZE_0).to(tl.int32)
     mask_0 = block_idx_0 < a
     for start_2 in range(0, c, BLOCK_SIZE_2):
         block_idx_2 = start_2 + tl.arange(0, BLOCK_SIZE_2).to(tl.int32)
@@ -170,7 +173,8 @@ from torch._inductor.runtime.triton_helpers import math as tl_math
 
 @triton.jit
 def _device_loop_3d_kernel(x, out, out_stride_0, out_stride_1, out_stride_2, out_stride_3, x_stride_0, x_stride_1, x_stride_2, x_stride_3, a, c, b, d, BLOCK_SIZE_0: tl.constexpr, BLOCK_SIZE_1_2_3: tl.constexpr):
-    block_idx_0 = tl.program_id(0) * BLOCK_SIZE_0 + tl.arange(0, BLOCK_SIZE_0).to(tl.int32)
+    pid_0 = tl.program_id(0)
+    block_idx_0 = pid_0 * BLOCK_SIZE_0 + tl.arange(0, BLOCK_SIZE_0).to(tl.int32)
     mask_0 = block_idx_0 < a
     for lid_1_2_3 in range(tl.cdiv(b * c * d, BLOCK_SIZE_1_2_3)):
         offsets_1_2_3 = lid_1_2_3 * BLOCK_SIZE_1_2_3 + tl.arange(0, BLOCK_SIZE_1_2_3).to(tl.int32)

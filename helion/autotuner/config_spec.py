@@ -52,6 +52,12 @@ class ConfigSpec:
         config.setdefault("num_stages", DEFAULT_NUM_STAGES)
         # TODO(jansel): include num_ctas and max_nreg
 
+        if self.block_size_specs:
+            if self.block_size_specs[0].allow_l2_grouping:
+                config.setdefault("l2_grouping", 1)
+            if 1 < len(self.block_size_specs[0]) <= 3:
+                config.setdefault("use_yz_grid", False)
+
     def normalize_block_sizes(self, block_sizes: object) -> list[int | list[int]]:
         if len(self.block_size_specs) == 0:
             if block_sizes:
@@ -129,6 +135,7 @@ class BlockSizeSpec:
     # TODO(jansel): need to flip this false if tl.dot is used
     allow_flattened: bool
     allow_reorder: bool
+    allow_l2_grouping: bool
 
     def can_be_int(self) -> bool:
         return len(self.size_hints) == 1 or self.allow_flattened

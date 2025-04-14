@@ -877,6 +877,8 @@ class TileIndexType(TypeInfo):
                 size_hints=[env.size_hint(x) for x in numels],
                 allow_flattened=len(numels) > 1,
                 allow_reorder=len(numels) > 1,
+                allow_l2_grouping=len(numels) == 2
+                and len(env.config_spec.block_size_specs) == 0,
             )
         )
         return [TileIndexType(origin, env.allocate_block_size(x)) for x in numels]

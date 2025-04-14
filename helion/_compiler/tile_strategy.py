@@ -18,6 +18,11 @@ from .ast_extension import expr_from_string
 from .ast_extension import statement_from_string
 from .compile_environment import CompileEnvironment
 from .host_function import HostFunction
+from .program_id import GridProgramIDs
+from .program_id import L2GroupingProgramIDs
+from .program_id import ProgramID
+from .program_id import ProgramIDs
+from .program_id import VirtualProgramIDs
 from .variable_origin import BlockSizeOrigin
 
 if TYPE_CHECKING:
@@ -297,13 +302,13 @@ class NDTileStrategy(TileStrategy):
         assert len(block_sizes) == len(block_indices)
         if len(block_sizes) > 3:
             raise exc.MaximumGridRank(len(block_sizes))
-        grid = []
-        dim = 0
+        pids = self.select_pid_strategy()
         for i, (block_idx, block_size) in enumerate(
             reversed(self._reorder([*zip(block_indices, block_sizes)]))
         ):
             numel = env.block_sizes[block_idx].numel
             offsets_var = self.index_var(block_idx)
+            pid_var = device_fn.new_var(f"pid_{i}")
             if block_size != 1:
                 # TODO(jansel): in static shapes mode we can optimize away masks further
                 mask_var = self.fn.new_var(f"mask_{block_idx}")
@@ -316,24 +321,28 @@ class NDTileStrategy(TileStrategy):
                 )
                 state.device_function.constexpr_arg(block_size_var)
                 state.add_statement(
-                    f"{offsets_var} = tl.program_id({i}) * ({block_size_var}) + tl.arange(0, ({block_size_var})).to({dtype})"
+                    f"{offsets_var} = {pid_var} * {block_size_var} + tl.arange(0, ({block_size_var})).to({dtype})"
                 )
                 state.add_statement(
                     f"{mask_var} = ({offsets_var} < ({device_fn.sympy_expr(numel)}))"
                 )
-                dim += 1
-                grid.append(
-                    f"triton.cdiv({HostFunction.current().sympy_expr(numel)}, {block_size_var})"
-                )
             else:
                 self.mask_vars[block_idx] = None
                 self.block_size_vars[block_idx] = None
+                block_size_var = "1"
                 dtype = CompileEnvironment.current().triton_index_type()
                 state.add_statement(
-                    f"{offsets_var} = tl.program_id({i}) + tl.zeros([1], {dtype})"
+                    f"{offsets_var} = {pid_var} + tl.zeros([1], {dtype})"
                 )
-                grid.append(HostFunction.current().sympy_expr(numel))
-        state.device_function.set_grid_expr(expr_from_string(f"({', '.join(grid)},)"))
+            pids.append(ProgramID(pid_var, block_size_var, numel))
+        pids.codegen(state)
+
+    def select_pid_strategy(self) -> ProgramIDs:
+        if self.spec.allow_l2_grouping and self.fn.config.l2_grouping > 1:
+            return L2GroupingProgramIDs(group_size=self.fn.config.l2_grouping)
+        if 1 < len(self.spec) <= 3 and self.fn.config.use_yz_grid:
+            return GridProgramIDs()
+        return VirtualProgramIDs()
 
     def codegen_device_loop(self, state: CodegenState) -> tuple[ast.For, list[ast.AST]]:
         block_indices = self.block_indices

@@ -55,3 +55,11 @@ class Config(Mapping[str, object]):
     @property
     def num_stages(self) -> int:
         return cast("int", self.config.get("num_stages", DEFAULT_NUM_STAGES))
+
+    @property
+    def l2_grouping(self) -> int:
+        return cast("int", self.config.get("l2_grouping", 1))
+
+    @property
+    def use_yz_grid(self) -> int:
+        return cast("bool", self.config.get("use_yz_grid", False))
