@@ -254,8 +254,19 @@ def codegen_matmul(ctx: GraphInterpreter, node: torch.fx.Node) -> ast.AST:
     lhs, rhs = map_arg(node.args, lambda arg: ctx.env[arg])
     assert isinstance(lhs, ast.AST)
     assert isinstance(rhs, ast.AST)
-    return expr_from_string("tl.dot(lhs, rhs)", lhs=lhs, rhs=rhs)
+    tf32 = CompileEnvironment.current().settings.dot_precision
+    return expr_from_string(f"tl.dot(lhs, rhs, input_precision={tf32!r})", lhs=lhs, rhs=rhs)
 
+# pyre-fixme[56]
+@register_lowering(torch.ops.aten.addmm.default)
+def codegen_matmul(ctx: GraphInterpreter, node: torch.fx.Node) -> ast.AST:
+    assert not node.kwargs, "addmm kwargs not supported"
+    acc, lhs, rhs = map_arg(node.args, lambda arg: ctx.env[arg])
+    assert isinstance(acc, ast.AST)
+    assert isinstance(lhs, ast.AST)
+    assert isinstance(rhs, ast.AST)
+    tf32 = CompileEnvironment.current().settings.dot_precision
+    return expr_from_string(f"tl.dot(lhs, rhs, acc=acc, input_precision={tf32!r})", lhs=lhs, rhs=rhs, acc=acc)
 
 # pyre-fixme[56]
 @register_lowering(torch.ops.aten.sym_size.int)

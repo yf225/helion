@@ -1,0 +1,138 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from expecttest import TestCase
+import torch
+
+import helion
+import helion.language as hl
+from helion._testing import DEVICE
+from helion._testing import code_and_output
+from helion._testing import import_path
+
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+examples_dir = Path(__file__).parent.parent / "examples"
+
+
+examples_matmul = import_path(examples_dir / f"matmul.py").matmul
+
+
+@helion.kernel
+def matmul_without_addmm(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    m, k = x.size()
+    k2, n = y.size()
+    assert k == k2, f"size mismatch {k} != {k2}"
+    out = torch.empty(
+        [m, n], dtype=torch.promote_types(x.dtype, y.dtype), device=x.device
+    )
+    for tile_m, tile_n in hl.tile([m, n]):
+        acc = hl.zeros([tile_m, tile_n], dtype=torch.float32)
+        for tile_k in hl.tile(k):
+            acc += torch.matmul(x[tile_m, tile_k], y[tile_k, tile_n])
+        out[tile_m, tile_n] = acc
+    return out
+
+
+class TestMatmul(TestCase):
+    def test_matmul0(self):
+        args = (
+            torch.randn([128, 128], device=DEVICE, dtype=torch.float32),
+            torch.randn([128, 128], device=DEVICE, dtype=torch.float32),
+        )
+        code, output = code_and_output(matmul_without_addmm, args,
+        block_sizes = [[16, 16], 16],
+        l2_grouping = 4,
+       )
+        torch.testing.assert_close(output, args[0] @ args[1], atol=1e-1, rtol=1e-2)
+        self.assertExpectedInline(
+            code,
+            """\
+import torch
+import triton
+from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
+
+@triton.jit
+def _matmul_without_addmm_kernel(x, y, out, out_stride_0, out_stride_1, x_stride_0, x_stride_1, y_stride_0, y_stride_1, m, n, k, BLOCK_SIZE_0: tl.constexpr, BLOCK_SIZE_1: tl.constexpr, BLOCK_SIZE_2: tl.constexpr):
+    num_pid_m = tl.cdiv(m, BLOCK_SIZE_0)
+    num_pid_n = tl.cdiv(n, BLOCK_SIZE_1)
+    num_pid_in_group = 4 * num_pid_n
+    group_id = tl.program_id(0) // num_pid_in_group
+    first_pid_m = group_id * 4
+    group_size_m = min(num_pid_m - first_pid_m, 4)
+    pid_0 = first_pid_m + tl.program_id(0) % num_pid_in_group % group_size_m
+    pid_1 = tl.program_id(0) % num_pid_in_group // group_size_m
+    block_idx_0 = pid_0 * BLOCK_SIZE_0 + tl.arange(0, BLOCK_SIZE_0).to(tl.int32)
+    mask_0 = block_idx_0 < m
+    block_idx_1 = pid_1 * BLOCK_SIZE_1 + tl.arange(0, BLOCK_SIZE_1).to(tl.int32)
+    mask_1 = block_idx_1 < n
+    acc = tl.full([BLOCK_SIZE_0, BLOCK_SIZE_1], 0.0, tl.float32)
+    for start_2 in range(0, k, BLOCK_SIZE_2):
+        block_idx_2 = start_2 + tl.arange(0, BLOCK_SIZE_2).to(tl.int32)
+        mask_2 = block_idx_2 < k
+        load = tl.load(x + (block_idx_0[:, None] * x_stride_0 + block_idx_2[None, :] * x_stride_1), mask_0[:, None] & mask_2[None, :], other=0)
+        load_1 = tl.load(y + (block_idx_2[:, None] * y_stride_0 + block_idx_1[None, :] * y_stride_1), mask_2[:, None] & mask_1[None, :], other=0)
+        mm = tl.dot(load, load_1, input_precision='tf32')
+        acc = acc + mm
+    tl.store(out + (block_idx_0[:, None] * out_stride_0 + block_idx_1[None, :] * out_stride_1), acc, mask_0[:, None] & mask_1[None, :])
+
+def matmul_without_addmm(x: torch.Tensor, y: torch.Tensor):
+    m, k = x.size()
+    k2, n = y.size()
+    assert k == k2, f'size mismatch {k} != {k2}'
+    out = torch.empty([m, n], dtype=torch.promote_types(x.dtype, y.dtype), device=x.device)
+    BLOCK_SIZE_0 = 16
+    BLOCK_SIZE_1 = 16
+    BLOCK_SIZE_2 = 16
+    _matmul_without_addmm_kernel[triton.cdiv(m, BLOCK_SIZE_0) * triton.cdiv(n, BLOCK_SIZE_1),](x, y, out, out.stride(0), out.stride(1), x.stride(0), x.stride(1), y.stride(0), y.stride(1), m, n, k, BLOCK_SIZE_0, BLOCK_SIZE_1, BLOCK_SIZE_2, num_warps=4, num_stages=3)
+    return out""",
+        )
+
+    def test_matmul1(self):
+        args = (
+            torch.randn([128, 128], device=DEVICE, dtype=torch.float32),
+            torch.randn([128, 128], device=DEVICE, dtype=torch.float32),
+        )
+        code, output = code_and_output(examples_matmul, args,
+                                       block_sizes = [[16, 16], 16],
+                                       )
+        torch.testing.assert_close(output, args[0] @ args[1], atol=1e-1, rtol=1e-2)
+        self.assertExpectedInline(
+            code,
+            """\
+import torch
+import triton
+from triton import language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
+
+@triton.jit
+def _matmul_kernel(x, y, out, out_stride_0, out_stride_1, x_stride_0, x_stride_1, y_stride_0, y_stride_1, m, n, k, BLOCK_SIZE_0: tl.constexpr, BLOCK_SIZE_1: tl.constexpr, BLOCK_SIZE_2: tl.constexpr):
+    num_blocks_0 = tl.cdiv(m, BLOCK_SIZE_0)
+    pid_0 = tl.program_id(0) % num_blocks_0
+    pid_1 = tl.program_id(0) // num_blocks_0
+    block_idx_0 = pid_0 * BLOCK_SIZE_0 + tl.arange(0, BLOCK_SIZE_0).to(tl.int32)
+    mask_0 = block_idx_0 < m
+    block_idx_1 = pid_1 * BLOCK_SIZE_1 + tl.arange(0, BLOCK_SIZE_1).to(tl.int32)
+    mask_1 = block_idx_1 < n
+    acc = tl.full([BLOCK_SIZE_0, BLOCK_SIZE_1], 0.0, tl.float32)
+    for start_2 in range(0, k, BLOCK_SIZE_2):
+        block_idx_2 = start_2 + tl.arange(0, BLOCK_SIZE_2).to(tl.int32)
+        mask_2 = block_idx_2 < k
+        load = tl.load(x + (block_idx_0[:, None] * x_stride_0 + block_idx_2[None, :] * x_stride_1), mask_0[:, None] & mask_2[None, :], other=0)
+        load_1 = tl.load(y + (block_idx_2[:, None] * y_stride_0 + block_idx_1[None, :] * y_stride_1), mask_2[:, None] & mask_1[None, :], other=0)
+        acc = tl.dot(load, load_1, acc=acc, input_precision='tf32')
+    tl.store(out + (block_idx_0[:, None] * out_stride_0 + block_idx_1[None, :] * out_stride_1), acc, mask_0[:, None] & mask_1[None, :])
+
+def matmul(x: torch.Tensor, y: torch.Tensor, acc_dtype=torch.float32):
+    m, k = x.size()
+    k2, n = y.size()
+    assert k == k2, f'size mismatch {k} != {k2}'
+    out = torch.empty([m, n], dtype=torch.promote_types(x.dtype, y.dtype), device=x.device)
+    BLOCK_SIZE_0 = 16
+    BLOCK_SIZE_1 = 16
+    BLOCK_SIZE_2 = 16
+    _matmul_kernel[triton.cdiv(m, BLOCK_SIZE_0) * triton.cdiv(n, BLOCK_SIZE_1),](x, y, out, out.stride(0), out.stride(1), x.stride(0), x.stride(1), y.stride(0), y.stride(1), m, n, k, BLOCK_SIZE_0, BLOCK_SIZE_1, BLOCK_SIZE_2, num_warps=4, num_stages=3)
+    return out""",
+        )

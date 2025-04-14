@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from typing import Protocol
 from typing import cast
 
@@ -50,6 +50,7 @@ class _Settings:
         default_factory=list
     )
     index_dtype: torch.dtype = torch.int32
+    dot_precision: Literal["tf32", "tf32x3", "ieee"] = "tf32"
 
 
 class Settings(_Settings):
@@ -63,6 +64,7 @@ class Settings(_Settings):
         "configs": "Optional list of Config objects to search in autotuning.",
         "ignore_warnings": "Subtypes of exc.BaseWarning to ignore when compiling.",
         "index_dtype": "The dtype to use for index variables. Default is torch.int32.",
+        "dot_precision": "Precision for dot products, see `triton.language.dot`. Can be 'tf32', 'tf32x3', or 'ieee'.",
     }
     assert __slots__.keys() == {field.name for field in dataclasses.fields(_Settings)}
 

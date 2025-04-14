@@ -114,6 +114,8 @@ class CompileEnvironment:
         if isinstance(obj, bool):
             with self.shape_env.ignore_fresh_unbacked_symbols():
                 return self.shape_env.create_unbacked_symbool()
+        if isinstance(obj, (torch.dtype, torch.device)):
+            return obj
         # TODO(jansel): support other types of args
         raise TypeError(f"unsupported argument type {type(obj)} ({source})")
 
