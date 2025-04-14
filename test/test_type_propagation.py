@@ -654,24 +654,24 @@ def device_ir():
     # File: .../basic_kernels.py:27 in hl_zeros_usage, code: tmp = hl.zeros(tile, dtype=x.dtype)
     block_size0: "Sym(u0)" = helion_language__tracing_ops__get_symnode('block_size0')
     block_size1: "Sym(u1)" = helion_language__tracing_ops__get_symnode('block_size1')
-    full: "i32[u0, u1]" = helion_language_creation_ops_full([block_size0, block_size1], 0, torch.int32)
+    tmp: "i32[u0, u1]" = helion_language_creation_ops_full([block_size0, block_size1], 0, torch.int32)
 
     # File: .../basic_kernels.py:28 in hl_zeros_usage, code: tmp += x[tile]
     x: "i32[s77, s27]" = helion_language__tracing_ops__host_tensor('x')
     load: "i32[u0, u1]" = helion_language_memory_ops_load(x, [block_size0, block_size1])
 
     # File: .../basic_kernels.py:28 in hl_zeros_usage, code: tmp += x[tile]
-    add: "i32[u0, u1]" = torch.ops.aten.add.Tensor(full, load);  full = load = None
+    tmp_1: "i32[u0, u1]" = torch.ops.aten.add.Tensor(tmp, load);  tmp = load = None
 
     # File: .../basic_kernels.py:29 in hl_zeros_usage, code: tmp += x[tile]
     load_1: "i32[u0, u1]" = helion_language_memory_ops_load(x, [block_size0, block_size1]);  x = None
 
     # File: .../basic_kernels.py:29 in hl_zeros_usage, code: tmp += x[tile]
-    add_1: "i32[u0, u1]" = torch.ops.aten.add.Tensor(add, load_1);  add = load_1 = None
+    tmp_2: "i32[u0, u1]" = torch.ops.aten.add.Tensor(tmp_1, load_1);  tmp_1 = load_1 = None
 
     # File: .../basic_kernels.py:30 in hl_zeros_usage, code: out[tile] = tmp
     out: "i32[s77, s27]" = helion_language__tracing_ops__host_tensor('out')
-    store = helion_language_memory_ops_store(out, [block_size0, block_size1], add_1);  out = block_size0 = block_size1 = add_1 = store = None
+    store = helion_language_memory_ops_store(out, [block_size0, block_size1], tmp_2);  out = block_size0 = block_size1 = tmp_2 = store = None
     return None""",
         )
 
@@ -724,24 +724,24 @@ def device_ir():
     # File: .../basic_kernels.py:38 in hl_full_usage, code: tmp = hl.full(tile, 1, dtype=x.dtype)
     block_size0: "Sym(u0)" = helion_language__tracing_ops__get_symnode('block_size0')
     block_size1: "Sym(u1)" = helion_language__tracing_ops__get_symnode('block_size1')
-    full: "i32[u0, u1]" = helion_language_creation_ops_full([block_size0, block_size1], 1, torch.int32)
+    tmp: "i32[u0, u1]" = helion_language_creation_ops_full([block_size0, block_size1], 1, torch.int32)
 
     # File: .../basic_kernels.py:39 in hl_full_usage, code: tmp += x[tile]
     x: "i32[s77, s27]" = helion_language__tracing_ops__host_tensor('x')
     load: "i32[u0, u1]" = helion_language_memory_ops_load(x, [block_size0, block_size1])
 
     # File: .../basic_kernels.py:39 in hl_full_usage, code: tmp += x[tile]
-    add: "i32[u0, u1]" = torch.ops.aten.add.Tensor(full, load);  full = load = None
+    tmp_1: "i32[u0, u1]" = torch.ops.aten.add.Tensor(tmp, load);  tmp = load = None
 
     # File: .../basic_kernels.py:40 in hl_full_usage, code: tmp += x[tile]
     load_1: "i32[u0, u1]" = helion_language_memory_ops_load(x, [block_size0, block_size1]);  x = None
 
     # File: .../basic_kernels.py:40 in hl_full_usage, code: tmp += x[tile]
-    add_1: "i32[u0, u1]" = torch.ops.aten.add.Tensor(add, load_1);  add = load_1 = None
+    tmp_2: "i32[u0, u1]" = torch.ops.aten.add.Tensor(tmp_1, load_1);  tmp_1 = load_1 = None
 
     # File: .../basic_kernels.py:41 in hl_full_usage, code: out[tile] = tmp
     out: "i32[s77, s27]" = helion_language__tracing_ops__host_tensor('out')
-    store = helion_language_memory_ops_store(out, [block_size0, block_size1], add_1);  out = block_size0 = block_size1 = add_1 = store = None
+    store = helion_language_memory_ops_store(out, [block_size0, block_size1], tmp_2);  out = block_size0 = block_size1 = tmp_2 = store = None
     return None""",
         )
 
@@ -968,19 +968,19 @@ def subgraph_0(arg0_1: "f32[u1, u2]"):
     mm: "f32[u1, u2]" = torch.ops.aten.mm.default(load, load_1);  load = load_1 = None
 
     # File: .../matmul.py:20 in matmul, code: acc += torch.matmul(x[tile_m, tile_k], y[tile_k, tile_n])
-    add: "f32[u1, u2]" = torch.ops.aten.add.Tensor(arg0_1, mm);  arg0_1 = mm = None
-    return [add]
+    acc: "f32[u1, u2]" = torch.ops.aten.add.Tensor(arg0_1, mm);  arg0_1 = mm = None
+    return [acc]
 
 def device_ir():
     # File: .../matmul.py:18 in matmul, code: acc = hl.zeros([tile_m, tile_n], dtype=torch.float32)
     block_size0: "Sym(u1)" = helion_language__tracing_ops__get_symnode('block_size0')
     block_size1: "Sym(u2)" = helion_language__tracing_ops__get_symnode('block_size1')
-    full: "f32[u1, u2]" = helion_language_creation_ops_full([block_size0, block_size1], 0.0, torch.float32)
+    acc: "f32[u1, u2]" = helion_language_creation_ops_full([block_size0, block_size1], 0.0, torch.float32)
 
     # File: .../matmul.py:19 in matmul, code: for tile_k in hl.tile(k):
-    _for_loop = helion_language__tracing_ops__for_loop(0, [full])
+    _for_loop = helion_language__tracing_ops__for_loop(0, [acc])
     getitem: "f32[u1, u2]" = _for_loop[0];  _for_loop = None
-    _phi: "f32[u1, u2]" = helion_language__tracing_ops__phi(full, getitem);  full = getitem = None
+    _phi: "f32[u1, u2]" = helion_language__tracing_ops__phi(acc, getitem);  acc = getitem = None
 
     # File: .../matmul.py:21 in matmul, code: out[tile_m, tile_n] = acc
     out: "f32[s77, s94]" = helion_language__tracing_ops__host_tensor('out')

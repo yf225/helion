@@ -116,10 +116,13 @@ class DeviceFunction:
         self._unique_counter: dict[str, itertools.count[int]] = defaultdict(
             itertools.count
         )
-        self.tile_strategy: TileStrategyDispatch = TileStrategyDispatch(self, config)
         self.grid_expr: ast.AST | None = None
         self.namespace: _Namespace = _Namespace()
+        self.namespace._used_names.update(
+            ["hl", "tl", "helion", "triton", "torch", "tl_math"]
+        )
         self._variable_renames: dict[str, list[str]] = {}
+        self.tile_strategy: TileStrategyDispatch = TileStrategyDispatch(self, config)
 
     def merge_variable_names(self, a: str, b: str) -> None:
         name_group = [
@@ -169,8 +172,7 @@ class DeviceFunction:
         return self.new_var(f"{prefix}_{next(self._unique_counter[prefix])}")
 
     def new_var(self, name: str) -> str:
-        # TODO(jansel): Check for conflicts with user-defined names and rename if needed
-        return f"_{name}"
+        return self.namespace.create_name(name, None)
 
     def tensor_arg(
         self, fake_value: torch.Tensor, prefer_name: str | None = None

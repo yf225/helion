@@ -194,6 +194,18 @@ class WalkDeviceAST(NodeVisitor):
 
     def _assign(self, target: ast.AST, value: object) -> None:
         if isinstance(target, ast.Name):
+            if isinstance(value, torch.Tensor):
+                # rename the node to match the variable name
+                mode = proxy_tensor.get_proxy_mode()
+                assert isinstance(mode, proxy_tensor.ProxyTorchDispatchMode)
+                tracer = mode.tracer
+                slot = proxy_tensor.get_proxy_slot(value, tracer, default=None)
+                if isinstance(slot, proxy_tensor._ProxyTensor):
+                    node = slot.proxy.node
+                    if target.id not in node.name:
+                        node.name = node.graph._graph_namespace.create_name(
+                            target.id, None
+                        )
             self.scope[target.id] = value
         elif isinstance(target, (ast.Tuple, ast.List)):
             for i, n in enumerate(target.elts):
