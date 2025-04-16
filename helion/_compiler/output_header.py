@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .. import exc
-from .ast_read_writes import ast_read_writes
+from .ast_read_writes import ReadWrites
 
 if TYPE_CHECKING:
     import ast
@@ -40,7 +40,7 @@ def get_needed_imports(root: ast.AST) -> str:
     :param root: The root AST node to analyze.
     :return: A string containing the required import statements, separated by newlines.
     """
-    rw = ast_read_writes(root)
+    rw = ReadWrites.from_ast(root)
     result = [library_imports[name] for name in library_imports if name in rw.reads]
     return "\n".join(result) + "\n\n"
 

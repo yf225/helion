@@ -46,16 +46,17 @@ import triton.language as tl
 @triton.jit
 def _pointwise_device_loop_kernel(x, out, out_stride_0, out_stride_1, x_stride_0, x_stride_1, n, m, _BLOCK_SIZE_0: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr):
     pid_0 = tl.program_id(0)
-    block_idx_0 = pid_0 * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
-    mask_0 = block_idx_0 < n
-    for start_1 in range(0, m, _BLOCK_SIZE_1):
-        block_idx_1 = start_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
-        mask_1 = block_idx_1 < m
-        load = tl.load(x + (block_idx_0[:, None] * x_stride_0 + block_idx_1[None, :] * x_stride_1), mask_0[:, None] & mask_1[None, :], other=0)
+    offset_0 = pid_0 * _BLOCK_SIZE_0
+    indices_0 = offset_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
+    mask_0 = indices_0 < n
+    for offset_1 in range(0, m, _BLOCK_SIZE_1):
+        indices_1 = offset_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
+        mask_1 = indices_1 < m
+        load = tl.load(x + (indices_0[:, None] * x_stride_0 + indices_1[None, :] * x_stride_1), mask_0[:, None] & mask_1[None, :], other=0)
         v_0 = 1.0
         v_1 = load + v_0
         v_2 = tl.sigmoid(v_1)
-        tl.store(out + (block_idx_0[:, None] * out_stride_0 + block_idx_1[None, :] * out_stride_1), v_2, mask_0[:, None] & mask_1[None, :])
+        tl.store(out + (indices_0[:, None] * out_stride_0 + indices_1[None, :] * out_stride_1), v_2, mask_0[:, None] & mask_1[None, :])
 
 def pointwise_device_loop(x: torch.Tensor):
     out = torch.empty_like(x)
@@ -85,19 +86,20 @@ from torch._inductor.runtime.triton_helpers import math as tl_math
 @triton.jit
 def _device_loop_3d_kernel(x, out, out_stride_0, out_stride_1, out_stride_2, out_stride_3, x_stride_0, x_stride_1, x_stride_2, x_stride_3, d, c, b, _BLOCK_SIZE_3: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr):
     pid_0 = tl.program_id(0)
-    block_idx_0 = pid_0 + tl.zeros([1], tl.int32)
-    for start_1 in range(0, b, _BLOCK_SIZE_1):
-        block_idx_1 = start_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
-        mask_1 = block_idx_1 < b
-        for start_2 in range(0, c, _BLOCK_SIZE_2):
-            block_idx_2 = start_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
-            mask_2 = block_idx_2 < c
-            for start_3 in range(0, d, _BLOCK_SIZE_3):
-                block_idx_3 = start_3 + tl.arange(0, _BLOCK_SIZE_3).to(tl.int32)
-                mask_3 = block_idx_3 < d
-                load = tl.load(x + (block_idx_0[:, None, None, None] * x_stride_0 + block_idx_1[None, :, None, None] * x_stride_1 + block_idx_2[None, None, :, None] * x_stride_2 + block_idx_3[None, None, None, :] * x_stride_3), mask_1[None, :, None, None] & mask_2[None, None, :, None] & mask_3[None, None, None, :], other=0)
+    offset_0 = pid_0
+    indices_0 = offset_0 + tl.zeros([1], tl.int32)
+    for offset_1 in range(0, b, _BLOCK_SIZE_1):
+        indices_1 = offset_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
+        mask_1 = indices_1 < b
+        for offset_2 in range(0, c, _BLOCK_SIZE_2):
+            indices_2 = offset_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
+            mask_2 = indices_2 < c
+            for offset_3 in range(0, d, _BLOCK_SIZE_3):
+                indices_3 = offset_3 + tl.arange(0, _BLOCK_SIZE_3).to(tl.int32)
+                mask_3 = indices_3 < d
+                load = tl.load(x + (indices_0[:, None, None, None] * x_stride_0 + indices_1[None, :, None, None] * x_stride_1 + indices_2[None, None, :, None] * x_stride_2 + indices_3[None, None, None, :] * x_stride_3), mask_1[None, :, None, None] & mask_2[None, None, :, None] & mask_3[None, None, None, :], other=0)
                 v_0 = tl_math.sin(load)
-                tl.store(out + (block_idx_0[:, None, None, None] * out_stride_0 + block_idx_1[None, :, None, None] * out_stride_1 + block_idx_2[None, None, :, None] * out_stride_2 + block_idx_3[None, None, None, :] * out_stride_3), v_0, mask_1[None, :, None, None] & mask_2[None, None, :, None] & mask_3[None, None, None, :])
+                tl.store(out + (indices_0[:, None, None, None] * out_stride_0 + indices_1[None, :, None, None] * out_stride_1 + indices_2[None, None, :, None] * out_stride_2 + indices_3[None, None, None, :] * out_stride_3), v_0, mask_1[None, :, None, None] & mask_2[None, None, :, None] & mask_3[None, None, None, :])
 
 def device_loop_3d(x: torch.Tensor):
     out = torch.empty_like(x)
@@ -129,19 +131,20 @@ from torch._inductor.runtime.triton_helpers import math as tl_math
 @triton.jit
 def _device_loop_3d_kernel(x, out, out_stride_0, out_stride_1, out_stride_2, out_stride_3, x_stride_0, x_stride_1, x_stride_2, x_stride_3, a, d, b, c, _BLOCK_SIZE_0: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr):
     pid_0 = tl.program_id(0)
-    block_idx_0 = pid_0 * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
-    mask_0 = block_idx_0 < a
-    for start_2 in range(0, c, _BLOCK_SIZE_2):
-        block_idx_2 = start_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
-        mask_2 = block_idx_2 < c
-        for start_1 in range(0, b, _BLOCK_SIZE_1):
-            block_idx_1 = start_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
-            mask_1 = block_idx_1 < b
-            for start_3 in range(0, d, 1):
-                block_idx_3 = start_3 + tl.arange(0, 1).to(tl.int32)
-                load = tl.load(x + (block_idx_0[:, None, None, None] * x_stride_0 + block_idx_1[None, :, None, None] * x_stride_1 + block_idx_2[None, None, :, None] * x_stride_2 + block_idx_3[None, None, None, :] * x_stride_3), mask_0[:, None, None, None] & mask_1[None, :, None, None] & mask_2[None, None, :, None], other=0)
+    offset_0 = pid_0 * _BLOCK_SIZE_0
+    indices_0 = offset_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
+    mask_0 = indices_0 < a
+    for offset_2 in range(0, c, _BLOCK_SIZE_2):
+        indices_2 = offset_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
+        mask_2 = indices_2 < c
+        for offset_1 in range(0, b, _BLOCK_SIZE_1):
+            indices_1 = offset_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
+            mask_1 = indices_1 < b
+            for offset_3 in range(0, d, 1):
+                indices_3 = offset_3 + tl.arange(0, 1).to(tl.int32)
+                load = tl.load(x + (indices_0[:, None, None, None] * x_stride_0 + indices_1[None, :, None, None] * x_stride_1 + indices_2[None, None, :, None] * x_stride_2 + indices_3[None, None, None, :] * x_stride_3), mask_0[:, None, None, None] & mask_1[None, :, None, None] & mask_2[None, None, :, None], other=0)
                 v_0 = tl_math.sin(load)
-                tl.store(out + (block_idx_0[:, None, None, None] * out_stride_0 + block_idx_1[None, :, None, None] * out_stride_1 + block_idx_2[None, None, :, None] * out_stride_2 + block_idx_3[None, None, None, :] * out_stride_3), v_0, mask_0[:, None, None, None] & mask_1[None, :, None, None] & mask_2[None, None, :, None])
+                tl.store(out + (indices_0[:, None, None, None] * out_stride_0 + indices_1[None, :, None, None] * out_stride_1 + indices_2[None, None, :, None] * out_stride_2 + indices_3[None, None, None, :] * out_stride_3), v_0, mask_0[:, None, None, None] & mask_1[None, :, None, None] & mask_2[None, None, :, None])
 
 def device_loop_3d(x: torch.Tensor):
     out = torch.empty_like(x)
@@ -173,17 +176,18 @@ from torch._inductor.runtime.triton_helpers import math as tl_math
 @triton.jit
 def _device_loop_3d_kernel(x, out, out_stride_0, out_stride_1, out_stride_2, out_stride_3, x_stride_0, x_stride_1, x_stride_2, x_stride_3, a, c, b, d, _BLOCK_SIZE_0: tl.constexpr, _BLOCK_SIZE_1_2_3: tl.constexpr):
     pid_0 = tl.program_id(0)
-    block_idx_0 = pid_0 * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
-    mask_0 = block_idx_0 < a
+    offset_0 = pid_0 * _BLOCK_SIZE_0
+    indices_0 = offset_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
+    mask_0 = indices_0 < a
     for lid_1_2_3 in range(tl.cdiv(b * c * d, _BLOCK_SIZE_1_2_3)):
         offsets_1_2_3 = lid_1_2_3 * _BLOCK_SIZE_1_2_3 + tl.arange(0, _BLOCK_SIZE_1_2_3).to(tl.int32)
-        block_idx_2 = offsets_1_2_3 % c
-        block_idx_1 = offsets_1_2_3 // c % b
-        block_idx_3 = offsets_1_2_3 // (b * c)
+        indices_2 = offsets_1_2_3 % c
+        indices_1 = offsets_1_2_3 // c % b
+        indices_3 = offsets_1_2_3 // (b * c)
         mask_1_2_3 = offsets_1_2_3 < b * c * d
-        load = tl.load(x + (block_idx_0[:, None] * x_stride_0 + block_idx_1[None, :] * x_stride_1 + block_idx_2[None, :] * x_stride_2 + block_idx_3[None, :] * x_stride_3), mask_0[:, None] & mask_1_2_3[None, :], other=0)
+        load = tl.load(x + (indices_0[:, None] * x_stride_0 + indices_1[None, :] * x_stride_1 + indices_2[None, :] * x_stride_2 + indices_3[None, :] * x_stride_3), mask_0[:, None] & mask_1_2_3[None, :], other=0)
         v_0 = tl_math.sin(load)
-        tl.store(out + (block_idx_0[:, None] * out_stride_0 + block_idx_1[None, :] * out_stride_1 + block_idx_2[None, :] * out_stride_2 + block_idx_3[None, :] * out_stride_3), v_0, mask_0[:, None] & mask_1_2_3[None, :])
+        tl.store(out + (indices_0[:, None] * out_stride_0 + indices_1[None, :] * out_stride_1 + indices_2[None, :] * out_stride_2 + indices_3[None, :] * out_stride_3), v_0, mask_0[:, None] & mask_1_2_3[None, :])
 
 def device_loop_3d(x: torch.Tensor):
     out = torch.empty_like(x)
@@ -191,5 +195,44 @@ def device_loop_3d(x: torch.Tensor):
     _BLOCK_SIZE_0 = 4
     _BLOCK_SIZE_1_2_3 = 128
     _device_loop_3d_kernel[triton.cdiv(a, _BLOCK_SIZE_0),](x, out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), x.stride(0), x.stride(1), x.stride(2), x.stride(3), a, c, b, d, _BLOCK_SIZE_0, _BLOCK_SIZE_1_2_3, num_warps=4, num_stages=3)
+    return out""",
+        )
+
+    def test_3d_device_loop3(self):
+        args = (torch.randn([128, 128, 128, 128], device=DEVICE),)
+        code, result = code_and_output(
+            device_loop_3d,
+            args,
+            block_sizes=[[2], [8, 4, 1]],
+            loop_order=[2, 0, 1],
+            indexing="block_ptr",
+        )
+        torch.testing.assert_close(result, torch.sin(args[0]))
+        self.assertExpectedInline(
+            code,
+            """\
+import torch
+import triton
+import triton.language as tl
+from torch._inductor.runtime.triton_helpers import math as tl_math
+
+@triton.jit
+def _device_loop_3d_kernel(x, out, out_size_0, out_size_1, out_size_2, out_size_3, x_size_0, x_size_1, x_size_2, x_size_3, out_stride_0, out_stride_1, out_stride_2, out_stride_3, x_stride_0, x_stride_1, x_stride_2, x_stride_3, c, b, d, _BLOCK_SIZE_0: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr):
+    pid_0 = tl.program_id(0)
+    offset_0 = pid_0 * _BLOCK_SIZE_0
+    for offset_3 in range(0, d, 1):
+        for offset_1 in range(0, b, _BLOCK_SIZE_1):
+            for offset_2 in range(0, c, _BLOCK_SIZE_2):
+                load = tl.load(tl.make_block_ptr(x, [x_size_0, x_size_1, x_size_2, x_size_3], [x_stride_0, x_stride_1, x_stride_2, x_stride_3], [offset_0, offset_1, offset_2, offset_3], [_BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2, 1], [3, 2, 1, 0]), boundary_check=[0, 1, 2, 3], padding_option='zero')
+                v_0 = tl_math.sin(load)
+                tl.store(tl.make_block_ptr(out, [out_size_0, out_size_1, out_size_2, out_size_3], [out_stride_0, out_stride_1, out_stride_2, out_stride_3], [offset_0, offset_1, offset_2, offset_3], [_BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2, 1], [3, 2, 1, 0]), v_0, boundary_check=[0, 1, 2, 3])
+
+def device_loop_3d(x: torch.Tensor):
+    out = torch.empty_like(x)
+    a, b, c, d = x.shape
+    _BLOCK_SIZE_0 = 2
+    _BLOCK_SIZE_2 = 4
+    _BLOCK_SIZE_1 = 8
+    _device_loop_3d_kernel[triton.cdiv(a, _BLOCK_SIZE_0),](x, out, out.size(0), out.size(1), out.size(2), out.size(3), x.size(0), x.size(1), x.size(2), x.size(3), out.stride(0), out.stride(1), out.stride(2), out.stride(3), x.stride(0), x.stride(1), x.stride(2), x.stride(3), c, b, d, _BLOCK_SIZE_0, _BLOCK_SIZE_2, _BLOCK_SIZE_1, num_warps=4, num_stages=3)
     return out""",
         )

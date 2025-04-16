@@ -31,12 +31,13 @@ import triton.language as tl
 @triton.jit
 def _add_kernel(x, y, out, x_size_0, out_stride_0, x_stride_0, y_stride_0, _BLOCK_SIZE_0: tl.constexpr):
     pid_0 = tl.program_id(0)
-    block_idx_0 = pid_0 * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
-    mask_0 = block_idx_0 < x_size_0
-    load = tl.load(x + block_idx_0 * x_stride_0, mask_0, other=0)
-    load_1 = tl.load(y + block_idx_0 * y_stride_0, mask_0, other=0)
+    offset_0 = pid_0 * _BLOCK_SIZE_0
+    indices_0 = offset_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
+    mask_0 = indices_0 < x_size_0
+    load = tl.load(x + indices_0 * x_stride_0, mask_0, other=0)
+    load_1 = tl.load(y + indices_0 * y_stride_0, mask_0, other=0)
     v_0 = load + load_1
-    tl.store(out + block_idx_0 * out_stride_0, v_0, mask_0)
+    tl.store(out + indices_0 * out_stride_0, v_0, mask_0)
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
@@ -63,13 +64,13 @@ import triton.language as tl
 @triton.jit
 def _add_kernel(x, y, out, x_size_0, x_size_1, out_stride_0, out_stride_1, x_stride_0, x_stride_1, y_stride_0, y_stride_1, _BLOCK_SIZE_0_1: tl.constexpr):
     offsets_0_1 = tl.program_id(0) * _BLOCK_SIZE_0_1 + tl.arange(0, _BLOCK_SIZE_0_1).to(tl.int32)
-    block_idx_1 = offsets_0_1 % x_size_1
-    block_idx_0 = offsets_0_1 // x_size_1
+    indices_1 = offsets_0_1 % x_size_1
+    indices_0 = offsets_0_1 // x_size_1
     mask_0_1 = offsets_0_1 < x_size_0 * x_size_1
-    load = tl.load(x + (block_idx_0 * x_stride_0 + block_idx_1 * x_stride_1), mask_0_1, other=0)
-    load_1 = tl.load(y + (block_idx_0 * y_stride_0 + block_idx_1 * y_stride_1), mask_0_1, other=0)
+    load = tl.load(x + (indices_0 * x_stride_0 + indices_1 * x_stride_1), mask_0_1, other=0)
+    load_1 = tl.load(y + (indices_0 * y_stride_0 + indices_1 * y_stride_1), mask_0_1, other=0)
     v_0 = load + load_1
-    tl.store(out + (block_idx_0 * out_stride_0 + block_idx_1 * out_stride_1), v_0, mask_0_1)
+    tl.store(out + (indices_0 * out_stride_0 + indices_1 * out_stride_1), v_0, mask_0_1)
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
@@ -98,13 +99,13 @@ import triton.language as tl
 @triton.jit
 def _add_kernel(x, y, out, x_size_0, x_size_1, out_stride_0, out_stride_1, x_stride_0, x_stride_1, y_stride_0, y_stride_1, _BLOCK_SIZE_0_1: tl.constexpr):
     offsets_0_1 = tl.program_id(0) * _BLOCK_SIZE_0_1 + tl.arange(0, _BLOCK_SIZE_0_1).to(tl.int32)
-    block_idx_0 = offsets_0_1 % x_size_0
-    block_idx_1 = offsets_0_1 // x_size_0
+    indices_0 = offsets_0_1 % x_size_0
+    indices_1 = offsets_0_1 // x_size_0
     mask_0_1 = offsets_0_1 < x_size_0 * x_size_1
-    load = tl.load(x + (block_idx_0 * x_stride_0 + block_idx_1 * x_stride_1), mask_0_1, other=0)
-    load_1 = tl.load(y + (block_idx_0 * y_stride_0 + block_idx_1 * y_stride_1), mask_0_1, other=0)
+    load = tl.load(x + (indices_0 * x_stride_0 + indices_1 * x_stride_1), mask_0_1, other=0)
+    load_1 = tl.load(y + (indices_0 * y_stride_0 + indices_1 * y_stride_1), mask_0_1, other=0)
     v_0 = load + load_1
-    tl.store(out + (block_idx_0 * out_stride_0 + block_idx_1 * out_stride_1), v_0, mask_0_1)
+    tl.store(out + (indices_0 * out_stride_0 + indices_1 * out_stride_1), v_0, mask_0_1)
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
@@ -131,14 +132,14 @@ import triton.language as tl
 @triton.jit
 def _add_kernel(x, y, out, x_size_0, x_size_1, x_size_2, out_stride_0, out_stride_1, out_stride_2, x_stride_0, x_stride_1, x_stride_2, y_stride_0, y_stride_1, y_stride_2, _BLOCK_SIZE_0_1_2: tl.constexpr):
     offsets_0_1_2 = tl.program_id(0) * _BLOCK_SIZE_0_1_2 + tl.arange(0, _BLOCK_SIZE_0_1_2).to(tl.int32)
-    block_idx_2 = offsets_0_1_2 % x_size_2
-    block_idx_1 = offsets_0_1_2 // x_size_2 % x_size_1
-    block_idx_0 = offsets_0_1_2 // (x_size_1 * x_size_2)
+    indices_2 = offsets_0_1_2 % x_size_2
+    indices_1 = offsets_0_1_2 // x_size_2 % x_size_1
+    indices_0 = offsets_0_1_2 // (x_size_1 * x_size_2)
     mask_0_1_2 = offsets_0_1_2 < x_size_0 * x_size_1 * x_size_2
-    load = tl.load(x + (block_idx_0 * x_stride_0 + block_idx_1 * x_stride_1 + block_idx_2 * x_stride_2), mask_0_1_2, other=0)
-    load_1 = tl.load(y + (block_idx_0 * y_stride_0 + block_idx_1 * y_stride_1 + block_idx_2 * y_stride_2), mask_0_1_2, other=0)
+    load = tl.load(x + (indices_0 * x_stride_0 + indices_1 * x_stride_1 + indices_2 * x_stride_2), mask_0_1_2, other=0)
+    load_1 = tl.load(y + (indices_0 * y_stride_0 + indices_1 * y_stride_1 + indices_2 * y_stride_2), mask_0_1_2, other=0)
     v_0 = load + load_1
-    tl.store(out + (block_idx_0 * out_stride_0 + block_idx_1 * out_stride_1 + block_idx_2 * out_stride_2), v_0, mask_0_1_2)
+    tl.store(out + (indices_0 * out_stride_0 + indices_1 * out_stride_1 + indices_2 * out_stride_2), v_0, mask_0_1_2)
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
@@ -169,16 +170,19 @@ def _add_kernel(x, y, out, x_size_0, x_size_1, x_size_2, out_stride_0, out_strid
     pid_0 = tl.program_id(0)
     pid_1 = tl.program_id(1)
     pid_2 = tl.program_id(2)
-    block_idx_0 = pid_0 * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
-    mask_0 = block_idx_0 < x_size_0
-    block_idx_1 = pid_1 * _BLOCK_SIZE_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
-    mask_1 = block_idx_1 < x_size_1
-    block_idx_2 = pid_2 * _BLOCK_SIZE_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
-    mask_2 = block_idx_2 < x_size_2
-    load = tl.load(x + (block_idx_0[:, None, None] * x_stride_0 + block_idx_1[None, :, None] * x_stride_1 + block_idx_2[None, None, :] * x_stride_2), mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :], other=0)
-    load_1 = tl.load(y + (block_idx_0[:, None, None] * y_stride_0 + block_idx_1[None, :, None] * y_stride_1 + block_idx_2[None, None, :] * y_stride_2), mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :], other=0)
+    offset_0 = pid_0 * _BLOCK_SIZE_0
+    indices_0 = offset_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
+    mask_0 = indices_0 < x_size_0
+    offset_1 = pid_1 * _BLOCK_SIZE_1
+    indices_1 = offset_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
+    mask_1 = indices_1 < x_size_1
+    offset_2 = pid_2 * _BLOCK_SIZE_2
+    indices_2 = offset_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
+    mask_2 = indices_2 < x_size_2
+    load = tl.load(x + (indices_0[:, None, None] * x_stride_0 + indices_1[None, :, None] * x_stride_1 + indices_2[None, None, :] * x_stride_2), mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :], other=0)
+    load_1 = tl.load(y + (indices_0[:, None, None] * y_stride_0 + indices_1[None, :, None] * y_stride_1 + indices_2[None, None, :] * y_stride_2), mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :], other=0)
     v_0 = load + load_1
-    tl.store(out + (block_idx_0[:, None, None] * out_stride_0 + block_idx_1[None, :, None] * out_stride_1 + block_idx_2[None, None, :] * out_stride_2), v_0, mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :])
+    tl.store(out + (indices_0[:, None, None] * out_stride_0 + indices_1[None, :, None] * out_stride_1 + indices_2[None, None, :] * out_stride_2), v_0, mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :])
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
@@ -209,14 +213,14 @@ import triton.language as tl
 @triton.jit
 def _add_kernel(x, y, out, x_size_0, x_size_1, x_size_2, out_stride_0, out_stride_1, out_stride_2, x_stride_0, x_stride_1, x_stride_2, y_stride_0, y_stride_1, y_stride_2, _BLOCK_SIZE_0_1_2: tl.constexpr):
     offsets_0_1_2 = tl.program_id(0) * _BLOCK_SIZE_0_1_2 + tl.arange(0, _BLOCK_SIZE_0_1_2).to(tl.int32)
-    block_idx_1 = offsets_0_1_2 % x_size_1
-    block_idx_0 = offsets_0_1_2 // x_size_1 % x_size_0
-    block_idx_2 = offsets_0_1_2 // (x_size_0 * x_size_1)
+    indices_1 = offsets_0_1_2 % x_size_1
+    indices_0 = offsets_0_1_2 // x_size_1 % x_size_0
+    indices_2 = offsets_0_1_2 // (x_size_0 * x_size_1)
     mask_0_1_2 = offsets_0_1_2 < x_size_0 * x_size_1 * x_size_2
-    load = tl.load(x + (block_idx_0 * x_stride_0 + block_idx_1 * x_stride_1 + block_idx_2 * x_stride_2), mask_0_1_2, other=0)
-    load_1 = tl.load(y + (block_idx_0 * y_stride_0 + block_idx_1 * y_stride_1 + block_idx_2 * y_stride_2), mask_0_1_2, other=0)
+    load = tl.load(x + (indices_0 * x_stride_0 + indices_1 * x_stride_1 + indices_2 * x_stride_2), mask_0_1_2, other=0)
+    load_1 = tl.load(y + (indices_0 * y_stride_0 + indices_1 * y_stride_1 + indices_2 * y_stride_2), mask_0_1_2, other=0)
     v_0 = load + load_1
-    tl.store(out + (block_idx_0 * out_stride_0 + block_idx_1 * out_stride_1 + block_idx_2 * out_stride_2), v_0, mask_0_1_2)
+    tl.store(out + (indices_0 * out_stride_0 + indices_1 * out_stride_1 + indices_2 * out_stride_2), v_0, mask_0_1_2)
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
@@ -249,16 +253,19 @@ def _add_kernel(x, y, out, x_size_0, x_size_1, x_size_2, out_stride_0, out_strid
     pid_0 = tl.program_id(0) % num_blocks_0
     pid_1 = tl.program_id(0) // num_blocks_0 % num_blocks_1
     pid_2 = tl.program_id(0) // (num_blocks_0 * num_blocks_1)
-    block_idx_0 = pid_0 * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
-    mask_0 = block_idx_0 < x_size_0
-    block_idx_1 = pid_1 * _BLOCK_SIZE_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
-    mask_1 = block_idx_1 < x_size_1
-    block_idx_2 = pid_2 * _BLOCK_SIZE_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
-    mask_2 = block_idx_2 < x_size_2
-    load = tl.load(x + (block_idx_0[:, None, None] * x_stride_0 + block_idx_1[None, :, None] * x_stride_1 + block_idx_2[None, None, :] * x_stride_2), mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :], other=0)
-    load_1 = tl.load(y + (block_idx_0[:, None, None] * y_stride_0 + block_idx_1[None, :, None] * y_stride_1 + block_idx_2[None, None, :] * y_stride_2), mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :], other=0)
+    offset_0 = pid_0 * _BLOCK_SIZE_0
+    indices_0 = offset_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
+    mask_0 = indices_0 < x_size_0
+    offset_1 = pid_1 * _BLOCK_SIZE_1
+    indices_1 = offset_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
+    mask_1 = indices_1 < x_size_1
+    offset_2 = pid_2 * _BLOCK_SIZE_2
+    indices_2 = offset_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
+    mask_2 = indices_2 < x_size_2
+    load = tl.load(x + (indices_0[:, None, None] * x_stride_0 + indices_1[None, :, None] * x_stride_1 + indices_2[None, None, :] * x_stride_2), mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :], other=0)
+    load_1 = tl.load(y + (indices_0[:, None, None] * y_stride_0 + indices_1[None, :, None] * y_stride_1 + indices_2[None, None, :] * y_stride_2), mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :], other=0)
     v_0 = load + load_1
-    tl.store(out + (block_idx_0[:, None, None] * out_stride_0 + block_idx_1[None, :, None] * out_stride_1 + block_idx_2[None, None, :] * out_stride_2), v_0, mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :])
+    tl.store(out + (indices_0[:, None, None] * out_stride_0 + indices_1[None, :, None] * out_stride_1 + indices_2[None, None, :] * out_stride_2), v_0, mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :])
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
@@ -293,16 +300,19 @@ def _add_kernel(x, y, out, x_size_0, x_size_1, x_size_2, out_stride_0, out_strid
     pid_0 = tl.program_id(0) % num_blocks_0
     pid_1 = tl.program_id(0) // num_blocks_0 % num_blocks_1
     pid_2 = tl.program_id(0) // (num_blocks_0 * num_blocks_1)
-    block_idx_2 = pid_0 * _BLOCK_SIZE_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
-    mask_2 = block_idx_2 < x_size_2
-    block_idx_1 = pid_1 * _BLOCK_SIZE_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
-    mask_1 = block_idx_1 < x_size_1
-    block_idx_0 = pid_2 * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
-    mask_0 = block_idx_0 < x_size_0
-    load = tl.load(x + (block_idx_0[:, None, None] * x_stride_0 + block_idx_1[None, :, None] * x_stride_1 + block_idx_2[None, None, :] * x_stride_2), mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :], other=0)
-    load_1 = tl.load(y + (block_idx_0[:, None, None] * y_stride_0 + block_idx_1[None, :, None] * y_stride_1 + block_idx_2[None, None, :] * y_stride_2), mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :], other=0)
+    offset_2 = pid_0 * _BLOCK_SIZE_2
+    indices_2 = offset_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
+    mask_2 = indices_2 < x_size_2
+    offset_1 = pid_1 * _BLOCK_SIZE_1
+    indices_1 = offset_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
+    mask_1 = indices_1 < x_size_1
+    offset_0 = pid_2 * _BLOCK_SIZE_0
+    indices_0 = offset_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
+    mask_0 = indices_0 < x_size_0
+    load = tl.load(x + (indices_0[:, None, None] * x_stride_0 + indices_1[None, :, None] * x_stride_1 + indices_2[None, None, :] * x_stride_2), mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :], other=0)
+    load_1 = tl.load(y + (indices_0[:, None, None] * y_stride_0 + indices_1[None, :, None] * y_stride_1 + indices_2[None, None, :] * y_stride_2), mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :], other=0)
     v_0 = load + load_1
-    tl.store(out + (block_idx_0[:, None, None] * out_stride_0 + block_idx_1[None, :, None] * out_stride_1 + block_idx_2[None, None, :] * out_stride_2), v_0, mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :])
+    tl.store(out + (indices_0[:, None, None] * out_stride_0 + indices_1[None, :, None] * out_stride_1 + indices_2[None, None, :] * out_stride_2), v_0, mask_0[:, None, None] & mask_1[None, :, None] & mask_2[None, None, :])
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
@@ -337,15 +347,18 @@ def _add_kernel(x, y, out, x_size_0, x_size_1, x_size_2, out_stride_0, out_strid
     pid_0 = tl.program_id(0) % num_blocks_0
     pid_1 = tl.program_id(0) // num_blocks_0 % num_blocks_1
     pid_2 = tl.program_id(0) // (num_blocks_0 * num_blocks_1)
-    block_idx_0 = pid_0 + tl.zeros([1], tl.int32)
-    block_idx_1 = pid_1 * _BLOCK_SIZE_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
-    mask_1 = block_idx_1 < x_size_1
-    block_idx_2 = pid_2 * _BLOCK_SIZE_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
-    mask_2 = block_idx_2 < x_size_2
-    load = tl.load(x + (block_idx_0[:, None, None] * x_stride_0 + block_idx_1[None, :, None] * x_stride_1 + block_idx_2[None, None, :] * x_stride_2), mask_1[None, :, None] & mask_2[None, None, :], other=0)
-    load_1 = tl.load(y + (block_idx_0[:, None, None] * y_stride_0 + block_idx_1[None, :, None] * y_stride_1 + block_idx_2[None, None, :] * y_stride_2), mask_1[None, :, None] & mask_2[None, None, :], other=0)
+    offset_0 = pid_0
+    indices_0 = offset_0 + tl.zeros([1], tl.int32)
+    offset_1 = pid_1 * _BLOCK_SIZE_1
+    indices_1 = offset_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
+    mask_1 = indices_1 < x_size_1
+    offset_2 = pid_2 * _BLOCK_SIZE_2
+    indices_2 = offset_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
+    mask_2 = indices_2 < x_size_2
+    load = tl.load(x + (indices_0[:, None, None] * x_stride_0 + indices_1[None, :, None] * x_stride_1 + indices_2[None, None, :] * x_stride_2), mask_1[None, :, None] & mask_2[None, None, :], other=0)
+    load_1 = tl.load(y + (indices_0[:, None, None] * y_stride_0 + indices_1[None, :, None] * y_stride_1 + indices_2[None, None, :] * y_stride_2), mask_1[None, :, None] & mask_2[None, None, :], other=0)
     v_0 = load + load_1
-    tl.store(out + (block_idx_0[:, None, None] * out_stride_0 + block_idx_1[None, :, None] * out_stride_1 + block_idx_2[None, None, :] * out_stride_2), v_0, mask_1[None, :, None] & mask_2[None, None, :])
+    tl.store(out + (indices_0[:, None, None] * out_stride_0 + indices_1[None, :, None] * out_stride_1 + indices_2[None, None, :] * out_stride_2), v_0, mask_1[None, :, None] & mask_2[None, None, :])
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
@@ -384,14 +397,17 @@ def _add_kernel(x, y, out, x_size_0, x_size_1, x_size_2, out_stride_0, out_strid
     pid_0 = tl.program_id(0) % num_blocks_0
     pid_1 = tl.program_id(0) // num_blocks_0 % num_blocks_1
     pid_2 = tl.program_id(0) // (num_blocks_0 * num_blocks_1)
-    block_idx_0 = pid_0 + tl.zeros([1], tl.int32)
-    block_idx_2 = pid_1 + tl.zeros([1], tl.int32)
-    block_idx_1 = pid_2 * _BLOCK_SIZE_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
-    mask_1 = block_idx_1 < x_size_1
-    load = tl.load(x + (block_idx_0[:, None, None] * x_stride_0 + block_idx_1[None, :, None] * x_stride_1 + block_idx_2[None, None, :] * x_stride_2), mask_1[None, :, None], other=0)
-    load_1 = tl.load(y + (block_idx_0[:, None, None] * y_stride_0 + block_idx_1[None, :, None] * y_stride_1 + block_idx_2[None, None, :] * y_stride_2), mask_1[None, :, None], other=0)
+    offset_0 = pid_0
+    indices_0 = offset_0 + tl.zeros([1], tl.int32)
+    offset_2 = pid_1
+    indices_2 = offset_2 + tl.zeros([1], tl.int32)
+    offset_1 = pid_2 * _BLOCK_SIZE_1
+    indices_1 = offset_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
+    mask_1 = indices_1 < x_size_1
+    load = tl.load(x + (indices_0[:, None, None] * x_stride_0 + indices_1[None, :, None] * x_stride_1 + indices_2[None, None, :] * x_stride_2), mask_1[None, :, None], other=0)
+    load_1 = tl.load(y + (indices_0[:, None, None] * y_stride_0 + indices_1[None, :, None] * y_stride_1 + indices_2[None, None, :] * y_stride_2), mask_1[None, :, None], other=0)
     v_0 = load + load_1
-    tl.store(out + (block_idx_0[:, None, None] * out_stride_0 + block_idx_1[None, :, None] * out_stride_1 + block_idx_2[None, None, :] * out_stride_2), v_0, mask_1[None, :, None])
+    tl.store(out + (indices_0[:, None, None] * out_stride_0 + indices_1[None, :, None] * out_stride_1 + indices_2[None, None, :] * out_stride_2), v_0, mask_1[None, :, None])
 
 def add(x, y):
     x, y = torch.broadcast_tensors(x, y)
@@ -425,15 +441,16 @@ from torch._inductor.runtime.triton_helpers import math as tl_math
 @triton.jit
 def _torch_ops_pointwise_kernel(x, y, out, x_size_0, out_stride_0, x_stride_0, y_stride_0, _BLOCK_SIZE_0: tl.constexpr):
     pid_0 = tl.program_id(0)
-    block_idx_0 = pid_0 * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
-    mask_0 = block_idx_0 < x_size_0
-    load = tl.load(x + block_idx_0 * x_stride_0, mask_0, other=0)
+    offset_0 = pid_0 * _BLOCK_SIZE_0
+    indices_0 = offset_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
+    mask_0 = indices_0 < x_size_0
+    load = tl.load(x + indices_0 * x_stride_0, mask_0, other=0)
     v_0 = tl_math.sin(load)
-    load_1 = tl.load(y + block_idx_0 * y_stride_0, mask_0, other=0)
+    load_1 = tl.load(y + indices_0 * y_stride_0, mask_0, other=0)
     v_1 = tl_math.cos(load_1)
     v_2 = v_0 + v_1
     v_3 = tl.sigmoid(v_2)
-    tl.store(out + block_idx_0 * out_stride_0, v_3, mask_0)
+    tl.store(out + indices_0 * out_stride_0, v_3, mask_0)
 
 def torch_ops_pointwise(x, y):
     out = torch.empty_like(x)
@@ -462,16 +479,18 @@ def _hl_zeros_usage_kernel(x, out, x_size_0, x_size_1, out_stride_0, out_stride_
     num_blocks_0 = tl.cdiv(x_size_0, _BLOCK_SIZE_0)
     pid_0 = tl.program_id(0) % num_blocks_0
     pid_1 = tl.program_id(0) // num_blocks_0
-    block_idx_0 = pid_0 * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
-    mask_0 = block_idx_0 < x_size_0
-    block_idx_1 = pid_1 * _BLOCK_SIZE_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
-    mask_1 = block_idx_1 < x_size_1
+    offset_0 = pid_0 * _BLOCK_SIZE_0
+    indices_0 = offset_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
+    mask_0 = indices_0 < x_size_0
+    offset_1 = pid_1 * _BLOCK_SIZE_1
+    indices_1 = offset_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
+    mask_1 = indices_1 < x_size_1
     tmp = tl.full([_BLOCK_SIZE_0, _BLOCK_SIZE_1], 0.0, tl.float32)
-    load = tl.load(x + (block_idx_0[:, None] * x_stride_0 + block_idx_1[None, :] * x_stride_1), mask_0[:, None] & mask_1[None, :], other=0)
+    load = tl.load(x + (indices_0[:, None] * x_stride_0 + indices_1[None, :] * x_stride_1), mask_0[:, None] & mask_1[None, :], other=0)
     v_0 = tmp + load
-    load_1 = tl.load(x + (block_idx_0[:, None] * x_stride_0 + block_idx_1[None, :] * x_stride_1), mask_0[:, None] & mask_1[None, :], other=0)
+    load_1 = tl.load(x + (indices_0[:, None] * x_stride_0 + indices_1[None, :] * x_stride_1), mask_0[:, None] & mask_1[None, :], other=0)
     v_1 = v_0 + load_1
-    tl.store(out + (block_idx_0[:, None] * out_stride_0 + block_idx_1[None, :] * out_stride_1), v_1, mask_0[:, None] & mask_1[None, :])
+    tl.store(out + (indices_0[:, None] * out_stride_0 + indices_1[None, :] * out_stride_1), v_1, mask_0[:, None] & mask_1[None, :])
 
 def hl_zeros_usage(x: torch.Tensor):
     out = torch.empty_like(x)
@@ -499,14 +518,15 @@ import triton.language as tl
 @triton.jit
 def _hl_full_usage_kernel(x, out, x_size_0, out_stride_0, x_stride_0, _BLOCK_SIZE_0: tl.constexpr):
     pid_0 = tl.program_id(0)
-    block_idx_0 = pid_0 * _BLOCK_SIZE_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
-    mask_0 = block_idx_0 < x_size_0
+    offset_0 = pid_0 * _BLOCK_SIZE_0
+    indices_0 = offset_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
+    mask_0 = indices_0 < x_size_0
     tmp = tl.full([_BLOCK_SIZE_0], 1, tl.float32)
-    load = tl.load(x + block_idx_0 * x_stride_0, mask_0, other=0)
+    load = tl.load(x + indices_0 * x_stride_0, mask_0, other=0)
     v_0 = tmp + load
-    load_1 = tl.load(x + block_idx_0 * x_stride_0, mask_0, other=0)
+    load_1 = tl.load(x + indices_0 * x_stride_0, mask_0, other=0)
     v_1 = v_0 + load_1
-    tl.store(out + block_idx_0 * out_stride_0, v_1, mask_0)
+    tl.store(out + indices_0 * out_stride_0, v_1, mask_0)
 
 def hl_full_usage(x: torch.Tensor):
     out = torch.empty_like(x)
@@ -533,15 +553,15 @@ import triton.language as tl
 @triton.jit
 def _hl_zeros_usage_kernel(x, out, x_size_0, x_size_1, out_stride_0, out_stride_1, x_stride_0, x_stride_1, _BLOCK_SIZE_0_1: tl.constexpr):
     offsets_0_1 = tl.program_id(0) * _BLOCK_SIZE_0_1 + tl.arange(0, _BLOCK_SIZE_0_1).to(tl.int32)
-    block_idx_1 = offsets_0_1 % x_size_1
-    block_idx_0 = offsets_0_1 // x_size_1
+    indices_1 = offsets_0_1 % x_size_1
+    indices_0 = offsets_0_1 // x_size_1
     mask_0_1 = offsets_0_1 < x_size_0 * x_size_1
     tmp = tl.full([_BLOCK_SIZE_0_1], 0.0, tl.float32)
-    load = tl.load(x + (block_idx_0 * x_stride_0 + block_idx_1 * x_stride_1), mask_0_1, other=0)
+    load = tl.load(x + (indices_0 * x_stride_0 + indices_1 * x_stride_1), mask_0_1, other=0)
     v_0 = tmp + load
-    load_1 = tl.load(x + (block_idx_0 * x_stride_0 + block_idx_1 * x_stride_1), mask_0_1, other=0)
+    load_1 = tl.load(x + (indices_0 * x_stride_0 + indices_1 * x_stride_1), mask_0_1, other=0)
     v_1 = v_0 + load_1
-    tl.store(out + (block_idx_0 * out_stride_0 + block_idx_1 * out_stride_1), v_1, mask_0_1)
+    tl.store(out + (indices_0 * out_stride_0 + indices_1 * out_stride_1), v_1, mask_0_1)
 
 def hl_zeros_usage(x: torch.Tensor):
     out = torch.empty_like(x)

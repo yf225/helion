@@ -143,6 +143,18 @@ class CompileEnvironment:
         assert isinstance(n, int)
         return n
 
+    def known_equal(self, a: int | torch.SymInt, b: int | torch.SymInt) -> bool:
+        if isinstance(a, torch.SymInt) or isinstance(b, torch.SymInt):
+            sa = a._sympy_() if isinstance(a, torch.SymInt) else a
+            sb = b._sympy_() if isinstance(b, torch.SymInt) else b
+            if sa == sb:
+                return True
+            res = self.shape_env._maybe_evaluate_static(sympy.Eq(sa, sb))
+            if res is None:
+                return False
+            return bool(res)
+        return a == b
+
     def triton_index_type(self) -> str:
         """tl.int32 or tl.int64 depending on Settings()"""
         return triton_type(self.settings.index_dtype)

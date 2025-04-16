@@ -4,7 +4,9 @@ import ast
 from collections import defaultdict
 import dataclasses
 import itertools
+import threading
 from typing import TYPE_CHECKING
+from typing import Protocol
 from typing import TypeVar
 from typing import cast
 
@@ -18,9 +20,12 @@ from .ast_extension import create_arg
 from .ast_extension import create_arguments
 from .ast_extension import expr_from_string
 from .ast_extension import statement_from_string
+from .ast_read_writes import ReadWrites
+from .ast_read_writes import ast_delete_assignments
 from .ast_read_writes import ast_rename
 from .compile_environment import CompileEnvironment
 from .host_function import HostFunction
+from .host_function import NoCurrentFunction
 from .output_header import reserved_names
 from .variable_origin import BlockSizeOrigin
 from .variable_origin import Origin
@@ -30,6 +35,12 @@ if TYPE_CHECKING:
     from ..runtime.config import Config
 
     _P = TypeVar("_P", bound="TensorPropertyArg")
+
+    class _TLS(Protocol):
+        functions: list[DeviceFunction]
+
+
+tls: _TLS = cast("_TLS", threading.local())
 
 
 @dataclasses.dataclass
@@ -53,6 +64,11 @@ class TensorArg(Argument):
 
     def host_str(self) -> str:
         return self._host_str
+
+
+@dataclasses.dataclass
+class TensorDescriptorArg(TensorArg):
+    pass
 
 
 @dataclasses.dataclass
@@ -93,6 +109,7 @@ class SymbolArgument(NumericArgument):
 
 
 _sort_order: dict[type[Argument], int] = {
+    TensorDescriptorArg: 0,
     TensorArg: 0,
     TensorSizeArg: 1,
     TensorStrideArg: 2,
@@ -109,6 +126,9 @@ class DeviceFunction:
         self.arguments: list[Argument] = []
         self.body: list[ast.AST] = []
         self._tensor_args: dict[torch.Tensor, TensorArg] = {}
+        self._tensor_descriptor_args: dict[
+            tuple[torch.Tensor, str], TensorDescriptorArg
+        ] = {}
         self._symbol_args: dict[str, SymbolArgument] = {}
         self._tensor_properties: dict[
             tuple[type[TensorPropertyArg], torch.Tensor, int], TensorPropertyArg
@@ -120,12 +140,13 @@ class DeviceFunction:
         self.namespace: _Namespace = _Namespace()
         self.namespace._used_names.update(reserved_names())
         self._variable_renames: dict[str, list[str]] = {}
+        self.dce_vars: list[str] = []
 
         from .indexing_strategy import IndexingStrategy
         from .tile_strategy import TileStrategyDispatch
 
         self.tile_strategy: TileStrategyDispatch = TileStrategyDispatch(self, config)
-        self.indexing_strategy: IndexingStrategy = IndexingStrategy.select(self, config)
+        self.indexing_strategy: IndexingStrategy = IndexingStrategy.select(config)
 
     def merge_variable_names(self, a: str, b: str) -> None:
         name_group = [
@@ -174,8 +195,11 @@ class DeviceFunction:
     def unique_name(self, prefix: str) -> str:
         return self.new_var(f"{prefix}_{next(self._unique_counter[prefix])}")
 
-    def new_var(self, name: str) -> str:
-        return self.namespace.create_name(name, None)
+    def new_var(self, name: str, *, dce: bool = False) -> str:
+        name = self.namespace.create_name(name, None)
+        if dce:
+            self.dce_vars.append(name)
+        return name
 
     def tensor_arg(
         self, fake_value: torch.Tensor, prefer_name: str | None = None
@@ -190,6 +214,25 @@ class DeviceFunction:
             self.arguments.append(arg)
             self._tensor_args[fake_value] = arg
         return self._tensor_args[fake_value]
+
+    def tensor_descriptor_arg(
+        self, fake_value: torch.Tensor, block_size: list[int | torch.SymInt]
+    ) -> TensorArg:
+        host_fn = HostFunction.current()
+        block_size_expr = ", ".join(
+            map(HostFunction.current().literal_expr, block_size)
+        )
+        key = (fake_value, block_size_expr)
+        if key not in self._tensor_descriptor_args:
+            origin = host_fn.tensor_to_origin[fake_value]
+            arg = TensorDescriptorArg(
+                self.new_var(origin.suggest_var_name() + "_desc"),
+                fake_value,
+                f"TensorDescriptor.from_tensor({origin.host_str()}, [{block_size_expr}])",
+            )
+            self.arguments.append(arg)
+            self._tensor_descriptor_args[key] = arg
+        return self._tensor_descriptor_args[key]
 
     def symbol_arg(self, sym: sympy.Symbol, origin: Origin) -> SymbolArgument:
         if sym.name not in self._symbol_args:
@@ -261,3 +304,55 @@ class DeviceFunction:
             f"{self.name}[__call_grid_expr]({', '.join(args)})",
             __call_grid_expr=grid_expr,
         )
+
+    def dead_code_elimination(self) -> None:
+        """
+        Remove variables that are not used in the function body.
+        """
+
+        for _ in range(8):
+            rw = ReadWrites.from_list(self.body)
+            to_remove = set()
+            for name in self.dce_vars:
+                if name in rw.writes and name not in rw.reads:
+                    to_remove.add(name)
+            if not to_remove:
+                break
+            self.body[:] = ast_delete_assignments(self.body, to_remove)
+
+        # drop any unused args
+        args_to_remove = {
+            arg.name for arg in self.arguments if arg.name not in rw.reads
+        }
+        if args_to_remove:
+            self.arguments = [
+                arg for arg in self.arguments if arg.name not in args_to_remove
+            ]
+            for cache in cast(
+                "list[dict[object, Argument]]",
+                [
+                    self._tensor_args,
+                    self._tensor_descriptor_args,
+                    self._symbol_args,
+                    self._tensor_properties,
+                ],
+            ):
+                for k, v in [*cache.items()]:
+                    if v.name in args_to_remove:
+                        del cache[k]
+
+    def __enter__(self) -> None:
+        try:
+            tls.functions.append(self)
+        except AttributeError:
+            tls.functions = [self]
+
+    def __exit__(self, *args: object) -> None:
+        tls.functions.pop()
+
+    @staticmethod
+    def current() -> DeviceFunction:
+        try:
+            return tls.functions[-1]
+        except (AttributeError, IndexError):
+            raise NoCurrentFunction from None

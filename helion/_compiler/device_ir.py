@@ -27,7 +27,6 @@ from .ast_extension import LoopType
 from .ast_extension import NodeVisitor
 from .ast_extension import create
 from .ast_read_writes import ReadWrites
-from .ast_read_writes import ast_read_writes
 from .compile_environment import CompileEnvironment
 from .host_function import HostFunction
 from .inductor_lowering import CodegenState
@@ -246,7 +245,7 @@ class WalkDeviceAST(NodeVisitor):
             self._assign(node.target, inner_type.proxy())
             self._body(node.body)
         elif node._loop_type == LoopType.DEVICE:
-            rw: ReadWrites = ast_read_writes(node)
+            rw: ReadWrites = ReadWrites.from_ast(node)
             inputs: LiftTensorArgs = LiftTensorArgs(
                 {k: self.scope[k] for k in rw if k in self.scope}
             )

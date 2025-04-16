@@ -60,7 +60,11 @@ class TileStrategy:
         self.block_size = block_size
         self.loop_order = loop_order
         self.index_vars: dict[int, str] = {
-            block_idx: self.fn.new_var(f"block_idx_{block_idx}")
+            block_idx: self.fn.new_var(f"indices_{block_idx}", dce=True)
+            for block_idx in block_indices
+        }
+        self.offset_vars: dict[int, str] = {
+            block_idx: self.fn.new_var(f"offset_{block_idx}", dce=True)
             for block_idx in block_indices
         }
 
@@ -79,6 +83,9 @@ class TileStrategy:
         )
         assert {*order} == {*range(len(order))}, f"Invalid permutation: {order}"
         return [block_indices[i] for i in reversed(order)]
+
+    def offset_var(self, block_idx: int) -> str:
+        return self.offset_vars[block_idx]
 
     def index_var(self, block_idx: int) -> str:
         return self.index_vars[block_idx]
@@ -127,11 +134,16 @@ class FlattenedTileStrategy(TileStrategy):
         assert isinstance(block_size, int)
         super().__init__(fn, block_indices, spec, block_size, loop_order)
         # TODO(jansel): optimize away unneeded masks and return None
-        self._mask_var: str = self.new_var("mask")
+        self._mask_var: str = self.new_var("mask", dce=True)
         self._block_size_var: str = self.new_var("_BLOCK_SIZE")
 
-    def new_var(self, prefix: str) -> str:
-        return self.fn.new_var(f"{prefix}_{'_'.join(map(str, self.block_indices))}")
+    def new_var(self, prefix: str, dce: bool = False) -> str:
+        return self.fn.new_var(
+            f"{prefix}_{'_'.join(map(str, self.block_indices))}", dce=dce
+        )
+
+    def offset_var(self, block_idx: int) -> str:
+        raise NotImplementedError("offset_var not used in FlattenedTileStrategy")
 
     def mask_var(self, block_idx: int) -> str:
         return self._mask_var
@@ -146,7 +158,7 @@ class FlattenedTileStrategy(TileStrategy):
         env = CompileEnvironment.current()
         total_numel = sympy.S.One
         device_fn = state.device_function
-        offsets_var = self.new_var("offsets")
+        offsets_var = self.new_var("offsets", dce=True)
         mask_var = self.mask_var(-1)
         block_size_var = self.block_size_var(-1)
         block_size = self.block_size
@@ -307,11 +319,12 @@ class NDTileStrategy(TileStrategy):
             reversed(self._reorder([*zip(block_indices, block_sizes)]))
         ):
             numel = env.block_sizes[block_idx].numel
-            offsets_var = self.index_var(block_idx)
-            pid_var = device_fn.new_var(f"pid_{i}")
+            offset_var = self.offset_var(block_idx)
+            index_var = self.index_var(block_idx)
+            pid_var = device_fn.new_var(f"pid_{i}", dce=True)
             if block_size != 1:
                 # TODO(jansel): in static shapes mode we can optimize away masks further
-                mask_var = self.fn.new_var(f"mask_{block_idx}")
+                mask_var = self.fn.new_var(f"mask_{block_idx}", dce=True)
                 self.mask_vars[block_idx] = mask_var
                 self.block_size_vars[block_idx] = block_size_var = device_fn.new_var(
                     f"_BLOCK_SIZE_{block_idx}"
@@ -321,19 +334,21 @@ class NDTileStrategy(TileStrategy):
                     statement_from_string(f"{block_size_var} = {block_size!r}")
                 )
                 state.device_function.constexpr_arg(block_size_var)
+                state.add_statement(f"{offset_var} = {pid_var} * {block_size_var}")
                 state.add_statement(
-                    f"{offsets_var} = {pid_var} * {block_size_var} + tl.arange(0, ({block_size_var})).to({dtype})"
+                    f"{index_var} = {offset_var} + tl.arange(0, ({block_size_var})).to({dtype})"
                 )
                 state.add_statement(
-                    f"{mask_var} = ({offsets_var} < ({device_fn.sympy_expr(numel)}))"
+                    f"{mask_var} = ({index_var} < ({device_fn.sympy_expr(numel)}))"
                 )
             else:
                 self.mask_vars[block_idx] = None
                 self.block_size_vars[block_idx] = None
                 block_size_var = "1"
                 dtype = CompileEnvironment.current().triton_index_type()
+                state.add_statement(f"{offset_var} = {pid_var}")
                 state.add_statement(
-                    f"{offsets_var} = {pid_var} + tl.zeros([1], {dtype})"
+                    f"{index_var} = {offset_var} + tl.zeros([1], {dtype})"
                 )
             pids.append(ProgramID(pid_var, block_size_var, numel))
         pids.codegen(state)
@@ -356,8 +371,8 @@ class NDTileStrategy(TileStrategy):
         assert len(block_sizes) == len(block_indices)
         for block_idx, block_size in self._reorder([*zip(block_indices, block_sizes)]):
             numel = env.block_sizes[block_idx].numel
-            offsets_var = self.index_var(block_idx)
-            start_var = self.fn.new_var(f"start_{block_idx}")
+            offset_var = self.offset_var(block_idx)
+            index_var = self.index_var(block_idx)
             if block_size != 1:
                 self.block_size_vars[block_idx] = block_size_var = device_fn.new_var(
                     f"_BLOCK_SIZE_{block_idx}"
@@ -367,7 +382,7 @@ class NDTileStrategy(TileStrategy):
                     statement_from_string(f"{block_size_var} = {block_size!r}")
                 )
                 self.mask_vars[block_idx] = mask_var = self.fn.new_var(
-                    f"mask_{block_idx}"
+                    f"mask_{block_idx}", dce=True
                 )
             else:
                 self.mask_vars[block_idx] = mask_var = None
@@ -375,7 +390,7 @@ class NDTileStrategy(TileStrategy):
                 block_size_var = "1"
             for_node = create(
                 ast.For,
-                target=create(ast.Name, id=start_var, ctx=ast.Store()),
+                target=create(ast.Name, id=offset_var, ctx=ast.Store()),
                 iter=expr_from_string(
                     f"range(0, ({device_fn.sympy_expr(numel)}), {block_size_var})"
                 ),
@@ -384,19 +399,18 @@ class NDTileStrategy(TileStrategy):
                 type_comment=None,
             )
             assert for_node.body is body
-            body.insert(
-                0,
+            extra_body = [
                 statement_from_string(
-                    f"{offsets_var} = {start_var} + tl.arange(0, ({block_size_var})).to({dtype})"
+                    f"{index_var} = {offset_var} + tl.arange(0, ({block_size_var})).to({dtype})"
                 ),
-            )
+            ]
             if mask_var is not None:
-                body.insert(
-                    1,
+                extra_body.append(
                     statement_from_string(
-                        f"{mask_var} = ({offsets_var} < ({device_fn.sympy_expr(numel)}))"
+                        f"{mask_var} = ({index_var} < ({device_fn.sympy_expr(numel)}))"
                     ),
                 )
+            body[:] = [*extra_body, *body]
             body = [for_node]
         assert for_node is not None
         return for_node, innermost_body
@@ -433,6 +447,9 @@ class TileStrategyDispatch:
             for idx in block_indices:
                 self.block_index_to_strategy[idx] = strategy
         assert not loop_orders
+
+    def offset_var(self, block_idx: int) -> str:
+        return self.block_index_to_strategy[block_idx].offset_var(block_idx)
 
     def index_var(self, block_idx: int) -> str:
         return self.block_index_to_strategy[block_idx].index_var(block_idx)

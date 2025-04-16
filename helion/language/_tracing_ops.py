@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from .._compiler.ast_extension import create
 from .._compiler.ast_extension import expr_from_string
 from .._compiler.host_function import HostFunction
 from . import _decorators
@@ -39,12 +38,7 @@ def _host_tensor(debug_name: str) -> torch.Tensor:
 
 @_decorators.codegen(_host_tensor)
 def _(state: CodegenState) -> ast.AST:
-    fake_value = state.fake_value
-    assert isinstance(fake_value, torch.Tensor)
-    name = state.device_function.tensor_arg(
-        fake_value, prefer_name=state.fx_node.name
-    ).name
-    return create(ast.Name, id=name, ctx=ast.Load())
+    return expr_from_string("_host_tensor")  # should be unused
 
 
 @_decorators.api()

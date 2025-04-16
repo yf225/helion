@@ -124,6 +124,7 @@ class GenerateAST(NodeVisitor):
                         ),
                     )
                 codegen_call_with_graph(self, self.host_fn.device_ir.root, [])
+            self.device_function.dead_code_elimination()
             return self.device_function.codegen_function_call()
         return self.generic_visit(node)
 
@@ -152,13 +153,14 @@ class SubscriptIndexing(NamedTuple):
 def generate_ast(func: HostFunction, config: Config) -> ast.AST:
     with func:
         codegen = GenerateAST(func, config)
-        for stmt in func.body:
-            codegen.add_statement(codegen.visit(stmt))
-        CompileEnvironment.current().errors.raise_if_errors()
-        return ast.Module(
-            [
-                codegen.device_function.codegen_function_def(),
-                func.codegen_function_def(codegen.host_statements),
-            ],
-            [],
-        )
+        with codegen.device_function:
+            for stmt in func.body:
+                codegen.add_statement(codegen.visit(stmt))
+            CompileEnvironment.current().errors.raise_if_errors()
+            return ast.Module(
+                [
+                    codegen.device_function.codegen_function_def(),
+                    func.codegen_function_def(codegen.host_statements),
+                ],
+                [],
+            )

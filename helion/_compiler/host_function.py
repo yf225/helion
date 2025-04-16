@@ -10,6 +10,7 @@ from typing import NamedTuple
 from typing import Protocol
 
 import sympy
+import torch
 from torch._inductor.codegen.wrapper import pexpr
 
 from . import ast_extension
@@ -22,8 +23,6 @@ from .variable_origin import Origin
 
 if TYPE_CHECKING:
     import types
-
-    import torch
 
     from .type_propagation import TypeInfo
 
@@ -94,6 +93,13 @@ class HostFunction:
             origin = self.symbol_to_origin[sym.name].origin
             replacements[sym] = sympy.Symbol(origin.host_str(), integer=True)
         return pexpr(expr.xreplace(replacements))
+
+    def literal_expr(self, expr: object) -> str:
+        if isinstance(expr, (torch.SymInt, torch.SymFloat, torch.SymBool)):
+            return self.sympy_expr(expr._sympy_())
+        if isinstance(expr, sympy.Expr):
+            return self.sympy_expr(expr)
+        return repr(expr)
 
     def debug_str(self) -> str:
         result = [
