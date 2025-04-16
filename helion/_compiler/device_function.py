@@ -108,6 +108,11 @@ class SymbolArgument(NumericArgument):
     pass
 
 
+class StaticShape(Argument):
+    def __init__(self, val: int) -> None:
+        super().__init__(repr(val))
+
+
 _sort_order: dict[type[Argument], int] = {
     TensorDescriptorArg: 0,
     TensorArg: 0,
@@ -264,10 +269,20 @@ class DeviceFunction:
             self._tensor_properties[key] = prop
         return cast("_P", self._tensor_properties[key])
 
-    def tensor_size(self, fake_value: torch.Tensor, dim: int) -> TensorSizeArg:
+    def tensor_size(self, fake_value: torch.Tensor, dim: int) -> Argument:
+        if (
+            isinstance(v := fake_value.size(dim), int)
+            and CompileEnvironment.current().settings.static_shapes
+        ):
+            return StaticShape(v)
         return self._tensor_property(TensorSizeArg, fake_value, dim, "size")
 
-    def tensor_stride(self, fake_value: torch.Tensor, dim: int) -> TensorStrideArg:
+    def tensor_stride(self, fake_value: torch.Tensor, dim: int) -> Argument:
+        if (
+            isinstance(v := fake_value.stride(dim), int)
+            and CompileEnvironment.current().settings.static_shapes
+        ):
+            return StaticShape(v)
         return self._tensor_property(TensorStrideArg, fake_value, dim, "stride")
 
     def sorted_args(self) -> list[Argument]:

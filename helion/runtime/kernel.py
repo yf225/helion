@@ -69,7 +69,7 @@ class Kernel:
         if not isinstance(args, tuple):
             assert isinstance(args, list), "args must be a tuple or list"
             args = tuple(args)
-        signature = _specialization_key(args)
+        signature = self._specialization_key(args)
         bound_kernel = self.bound_kernels.get(signature)
         if bound_kernel is None:
             normalized_args: tuple[object, ...] = self.normalize_args(*args)
@@ -80,6 +80,15 @@ class Kernel:
                 bound_kernel = BoundKernel(self, args)
             self.bound_kernels[signature] = bound_kernel
         return bound_kernel
+
+    def _specialization_key(self, obj: object) -> Hashable:
+        try:
+            extractor = _specialization_extractors[type(obj)]
+        except KeyError:
+            raise TypeError(
+                f"unsupported argument type: {type(obj).__name__}"
+            ) from None
+        return extractor(self, obj)
 
     def normalize_args(self, *args: object, **kwargs: object) -> tuple[object, ...]:
         """
@@ -144,27 +153,47 @@ class BoundKernel:
         raise NotImplementedError
 
 
-def _specialization_key(obj: object) -> Hashable:
-    try:
-        extractor = _specialization_extractors[type(obj)]
-    except KeyError:
-        raise TypeError(f"unsupported argument type: {type(obj).__name__}") from None
-    return extractor(obj)
-
-
-def _tensor_key(obj: torch.Tensor) -> Hashable:
+def _tensor_key(fn: Kernel, obj: torch.Tensor) -> Hashable:
+    if fn.settings.static_shapes:
+        return (
+            obj.dtype,
+            obj.device,
+            (*obj.size(),),
+            (*obj.stride(),),
+        )
     return (
         obj.dtype,
         obj.device,
         # 0, 1, or >=2 specialization
         tuple([min(s, 2) for s in obj.size()]),
-        # TODO(jansel): add a way to disable this one
-        obj.is_contiguous(),
     )
 
 
-def _sequence_key(obj: Sequence) -> Hashable:
-    return type(obj), tuple([_specialization_key(item) for item in obj])
+def _sequence_key(fn: Kernel, obj: Sequence) -> Hashable:
+    return type(obj), tuple([fn._specialization_key(item) for item in obj])
+
+
+def _number_key(fn: Kernel, n: float | bool) -> object:
+    if fn.settings.static_shapes:
+        return n
+    return type(n)
+
+
+_specialization_extractors: dict[type[object], Callable[[Kernel, object], Hashable]] = {
+    torch.Tensor: _tensor_key,
+    torch.nn.Parameter: _tensor_key,
+    torch.dtype: lambda fn, x: x,
+    torch.device: lambda fn, x: x,
+    int: _number_key,
+    float: _number_key,
+    bool: _number_key,
+    str: lambda fn, x: x,
+    list: _sequence_key,
+    tuple: _sequence_key,
+    dict: lambda fn, x: tuple(
+        sorted((k, fn._specialization_key(v)) for k, v in x.items())
+    ),
+}
 
 
 def _extract_device(args: tuple[object, ...]) -> torch.device:
@@ -190,21 +219,6 @@ def _extract_device(args: tuple[object, ...]) -> torch.device:
                 except exc.NoTensorArgs:
                     pass
     raise exc.NoTensorArgs
-
-
-_specialization_extractors: dict[type[object], Callable[[object], Hashable]] = {
-    torch.Tensor: _tensor_key,
-    torch.nn.Parameter: _tensor_key,
-    torch.dtype: lambda x: x,
-    torch.device: lambda x: x,
-    int: lambda x: int,
-    float: lambda x: float,
-    bool: lambda x: bool,
-    str: lambda x: str,
-    list: _sequence_key,
-    tuple: _sequence_key,
-    dict: lambda x: tuple(sorted((k, _specialization_key(v)) for k, v in x.items())),
-}
 
 
 @overload

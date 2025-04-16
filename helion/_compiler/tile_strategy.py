@@ -3,7 +3,9 @@ from __future__ import annotations
 import ast
 import collections
 import dataclasses
+import functools
 import itertools
+import operator
 from typing import TYPE_CHECKING
 from typing import NamedTuple
 from typing import TypeVar
@@ -133,8 +135,16 @@ class FlattenedTileStrategy(TileStrategy):
     ) -> None:
         assert isinstance(block_size, int)
         super().__init__(fn, block_indices, spec, block_size, loop_order)
-        # TODO(jansel): optimize away unneeded masks and return None
-        self._mask_var: str = self.new_var("mask", dce=True)
+        env = CompileEnvironment.current()
+        if env.known_multiple(
+            functools.reduce(
+                operator.mul, [env.block_sizes[i].numel for i in block_indices]
+            ),
+            block_size,
+        ):
+            self._mask_var: str | None = None
+        else:
+            self._mask_var = self.new_var("mask", dce=True)
         self._block_size_var: str = self.new_var("_BLOCK_SIZE")
 
     def new_var(self, prefix: str, dce: bool = False) -> str:
@@ -145,7 +155,7 @@ class FlattenedTileStrategy(TileStrategy):
     def offset_var(self, block_idx: int) -> str:
         raise NotImplementedError("offset_var not used in FlattenedTileStrategy")
 
-    def mask_var(self, block_idx: int) -> str:
+    def mask_var(self, block_idx: int) -> str | None:
         return self._mask_var
 
     def block_size_var(self, block_idx: int) -> str:
@@ -159,7 +169,6 @@ class FlattenedTileStrategy(TileStrategy):
         total_numel = sympy.S.One
         device_fn = state.device_function
         offsets_var = self.new_var("offsets", dce=True)
-        mask_var = self.mask_var(-1)
         block_size_var = self.block_size_var(-1)
         block_size = self.block_size
         assert isinstance(block_size, int)
@@ -180,12 +189,13 @@ class FlattenedTileStrategy(TileStrategy):
             statements.append(statement_from_string(f"{block_index_var} = {expr}"))
             total_numel = total_numel * numel
 
-        assert mask_var is not None
-        statements.append(
-            statement_from_string(
-                f"{mask_var} = {offsets_var} < ({device_fn.sympy_expr(total_numel)})"
+        mask_var = self.mask_var(-1)
+        if mask_var is not None:
+            statements.append(
+                statement_from_string(
+                    f"{mask_var} = {offsets_var} < ({device_fn.sympy_expr(total_numel)})"
+                )
             )
-        )
         return block_size_var, offsets_var, total_numel, statements
 
     def codegen_grid(self, state: CodegenState) -> None:
@@ -323,9 +333,6 @@ class NDTileStrategy(TileStrategy):
             index_var = self.index_var(block_idx)
             pid_var = device_fn.new_var(f"pid_{i}", dce=True)
             if block_size != 1:
-                # TODO(jansel): in static shapes mode we can optimize away masks further
-                mask_var = self.fn.new_var(f"mask_{block_idx}", dce=True)
-                self.mask_vars[block_idx] = mask_var
                 self.block_size_vars[block_idx] = block_size_var = device_fn.new_var(
                     f"_BLOCK_SIZE_{block_idx}"
                 )
@@ -338,11 +345,7 @@ class NDTileStrategy(TileStrategy):
                 state.add_statement(
                     f"{index_var} = {offset_var} + tl.arange(0, ({block_size_var})).to({dtype})"
                 )
-                state.add_statement(
-                    f"{mask_var} = ({index_var} < ({device_fn.sympy_expr(numel)}))"
-                )
             else:
-                self.mask_vars[block_idx] = None
                 self.block_size_vars[block_idx] = None
                 block_size_var = "1"
                 dtype = CompileEnvironment.current().triton_index_type()
@@ -350,8 +353,26 @@ class NDTileStrategy(TileStrategy):
                 state.add_statement(
                     f"{index_var} = {offset_var} + tl.zeros([1], {dtype})"
                 )
+            mask_statement = self._setup_mask(state, block_idx, block_size, index_var)
+            if mask_statement is not None:
+                state.add_statement(mask_statement)
             pids.append(ProgramID(pid_var, block_size_var, numel))
         pids.codegen(state)
+
+    def _setup_mask(
+        self, state: CodegenState, block_idx: int, block_size: int, index_var: str
+    ) -> ast.AST | None:
+        env = CompileEnvironment.current()
+        numel = env.block_sizes[block_idx].numel
+        if block_size == 1 or env.known_multiple(numel, block_size):
+            self.mask_vars[block_idx] = None
+            return None
+        self.mask_vars[block_idx] = mask_var = self.fn.new_var(
+            f"mask_{block_idx}", dce=True
+        )
+        return statement_from_string(
+            f"{mask_var} = ({index_var} < ({state.device_function.sympy_expr(numel)}))"
+        )
 
     def select_pid_strategy(self) -> ProgramIDs:
         if self.spec.allow_l2_grouping and self.fn.config.l2_grouping > 1:
@@ -361,6 +382,7 @@ class NDTileStrategy(TileStrategy):
         return VirtualProgramIDs()
 
     def codegen_device_loop(self, state: CodegenState) -> tuple[ast.For, list[ast.AST]]:
+        # TODO(jansel): refactor this to share code with codegen_grid
         block_indices = self.block_indices
         env = CompileEnvironment.current()
         device_fn = state.device_function
@@ -381,11 +403,7 @@ class NDTileStrategy(TileStrategy):
                 state.codegen.host_statements.append(
                     statement_from_string(f"{block_size_var} = {block_size!r}")
                 )
-                self.mask_vars[block_idx] = mask_var = self.fn.new_var(
-                    f"mask_{block_idx}", dce=True
-                )
             else:
-                self.mask_vars[block_idx] = mask_var = None
                 self.block_size_vars[block_idx] = None
                 block_size_var = "1"
             for_node = create(
@@ -404,12 +422,9 @@ class NDTileStrategy(TileStrategy):
                     f"{index_var} = {offset_var} + tl.arange(0, ({block_size_var})).to({dtype})"
                 ),
             ]
-            if mask_var is not None:
-                extra_body.append(
-                    statement_from_string(
-                        f"{mask_var} = ({index_var} < ({device_fn.sympy_expr(numel)}))"
-                    ),
-                )
+            mask_statement = self._setup_mask(state, block_idx, block_size, index_var)
+            if mask_statement is not None:
+                extra_body.append(mask_statement)
             body[:] = [*extra_body, *body]
             body = [for_node]
         assert for_node is not None
@@ -456,6 +471,9 @@ class TileStrategyDispatch:
 
     def mask_var(self, block_idx: int) -> str | None:
         return self.block_index_to_strategy[block_idx].mask_var(block_idx)
+
+    def need_mask(self, block_idx: int) -> bool:
+        return self.block_index_to_strategy[block_idx].mask_var(block_idx) is not None
 
     def block_size_var(self, block_idx: int) -> str | None:
         return self.block_index_to_strategy[block_idx].block_size_var(block_idx)

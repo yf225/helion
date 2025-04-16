@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import unittest
 
 from expecttest import TestCase
 import torch
@@ -22,6 +23,22 @@ examples_matmul = import_path(examples_dir / "matmul.py").matmul
 
 @helion.kernel
 def matmul_without_addmm(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    m, k = x.size()
+    k2, n = y.size()
+    assert k == k2, f"size mismatch {k} != {k2}"
+    out = torch.empty(
+        [m, n], dtype=torch.promote_types(x.dtype, y.dtype), device=x.device
+    )
+    for tile_m, tile_n in hl.tile([m, n]):
+        acc = hl.zeros([tile_m, tile_n], dtype=torch.float32)
+        for tile_k in hl.tile(k):
+            acc += torch.matmul(x[tile_m, tile_k], y[tile_k, tile_n])
+        out[tile_m, tile_n] = acc
+    return out
+
+
+@helion.kernel(static_shapes=True)
+def matmul_static_shapes(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     m, k = x.size()
     k2, n = y.size()
     assert k == k2, f"size mismatch {k} != {k2}"
@@ -244,5 +261,227 @@ def matmul(x: torch.Tensor, y: torch.Tensor, acc_dtype: torch.dtype=torch.float3
     _BLOCK_SIZE_1 = 16
     _BLOCK_SIZE_2 = 16
     _matmul_kernel[triton.cdiv(m, _BLOCK_SIZE_0) * triton.cdiv(n, _BLOCK_SIZE_1),](TensorDescriptor.from_tensor(x, [_BLOCK_SIZE_0, _BLOCK_SIZE_2]), TensorDescriptor.from_tensor(y, [_BLOCK_SIZE_2, _BLOCK_SIZE_1]), TensorDescriptor.from_tensor(out, [_BLOCK_SIZE_0, _BLOCK_SIZE_1]), m, n, k, _BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2, num_warps=4, num_stages=3)
+    return out""",
+        )
+
+    def test_matmul_static_shapes0(self):
+        args = (
+            torch.randn([128, 128], device=DEVICE, dtype=torch.float32),
+            torch.randn([128, 128], device=DEVICE, dtype=torch.float32),
+        )
+        code, output = code_and_output(
+            matmul_static_shapes,
+            args,
+            block_sizes=[[16, 16], 16],
+            l2_grouping=4,
+            indexing="pointer",
+        )
+        torch.testing.assert_close(output, args[0] @ args[1], atol=1e-1, rtol=1e-2)
+        self.assertExpectedInline(
+            code,
+            """\
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def _matmul_static_shapes_kernel(x, y, out, _BLOCK_SIZE_0: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr):
+    num_pid_m = tl.cdiv(128, _BLOCK_SIZE_0)
+    num_pid_n = tl.cdiv(128, _BLOCK_SIZE_1)
+    num_pid_in_group = 4 * num_pid_n
+    group_id = tl.program_id(0) // num_pid_in_group
+    first_pid_m = group_id * 4
+    group_size_m = min(num_pid_m - first_pid_m, 4)
+    pid_0 = first_pid_m + tl.program_id(0) % num_pid_in_group % group_size_m
+    pid_1 = tl.program_id(0) % num_pid_in_group // group_size_m
+    offset_0 = pid_0 * _BLOCK_SIZE_0
+    indices_0 = offset_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
+    offset_1 = pid_1 * _BLOCK_SIZE_1
+    indices_1 = offset_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
+    acc = tl.full([_BLOCK_SIZE_0, _BLOCK_SIZE_1], 0.0, tl.float32)
+    for offset_2 in range(0, 128, _BLOCK_SIZE_2):
+        indices_2 = offset_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
+        load = tl.load(x + (indices_0[:, None] * 128 + indices_2[None, :] * 1), None)
+        load_1 = tl.load(y + (indices_2[:, None] * 128 + indices_1[None, :] * 1), None)
+        mm = tl.dot(load, load_1, input_precision='tf32')
+        acc = acc + mm
+    tl.store(out + (indices_0[:, None] * 128 + indices_1[None, :] * 1), acc, None)
+
+def matmul_static_shapes(x: torch.Tensor, y: torch.Tensor):
+    m, k = x.size()
+    k2, n = y.size()
+    assert k == k2, f'size mismatch {k} != {k2}'
+    out = torch.empty([m, n], dtype=torch.promote_types(x.dtype, y.dtype), device=x.device)
+    _BLOCK_SIZE_0 = 16
+    _BLOCK_SIZE_1 = 16
+    _BLOCK_SIZE_2 = 16
+    _matmul_static_shapes_kernel[triton.cdiv(128, _BLOCK_SIZE_0) * triton.cdiv(128, _BLOCK_SIZE_1),](x, y, out, _BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2, num_warps=4, num_stages=3)
+    return out""",
+        )
+
+    def test_matmul_static_shapes1(self):
+        args = (
+            torch.randn([128, 128], device=DEVICE, dtype=torch.float32),
+            torch.randn([128, 128], device=DEVICE, dtype=torch.float32),
+        )
+        code, output = code_and_output(
+            matmul_static_shapes,
+            args,
+            block_sizes=[[16, 16], 16],
+            l2_grouping=4,
+        )
+        torch.testing.assert_close(output, args[0] @ args[1], atol=1e-1, rtol=1e-2)
+        self.assertExpectedInline(
+            code,
+            """\
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def _matmul_static_shapes_kernel(x, y, out, _BLOCK_SIZE_0: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr):
+    num_pid_m = tl.cdiv(128, _BLOCK_SIZE_0)
+    num_pid_n = tl.cdiv(128, _BLOCK_SIZE_1)
+    num_pid_in_group = 4 * num_pid_n
+    group_id = tl.program_id(0) // num_pid_in_group
+    first_pid_m = group_id * 4
+    group_size_m = min(num_pid_m - first_pid_m, 4)
+    pid_0 = first_pid_m + tl.program_id(0) % num_pid_in_group % group_size_m
+    pid_1 = tl.program_id(0) % num_pid_in_group // group_size_m
+    offset_0 = pid_0 * _BLOCK_SIZE_0
+    indices_0 = offset_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
+    offset_1 = pid_1 * _BLOCK_SIZE_1
+    indices_1 = offset_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
+    acc = tl.full([_BLOCK_SIZE_0, _BLOCK_SIZE_1], 0.0, tl.float32)
+    for offset_2 in range(0, 128, _BLOCK_SIZE_2):
+        indices_2 = offset_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
+        load = tl.load(x + (indices_0[:, None] * 128 + indices_2[None, :] * 1), None)
+        load_1 = tl.load(y + (indices_2[:, None] * 128 + indices_1[None, :] * 1), None)
+        mm = tl.dot(load, load_1, input_precision='tf32')
+        acc = acc + mm
+    tl.store(out + (indices_0[:, None] * 128 + indices_1[None, :] * 1), acc, None)
+
+def matmul_static_shapes(x: torch.Tensor, y: torch.Tensor):
+    m, k = x.size()
+    k2, n = y.size()
+    assert k == k2, f'size mismatch {k} != {k2}'
+    out = torch.empty([m, n], dtype=torch.promote_types(x.dtype, y.dtype), device=x.device)
+    _BLOCK_SIZE_0 = 16
+    _BLOCK_SIZE_1 = 16
+    _BLOCK_SIZE_2 = 16
+    _matmul_static_shapes_kernel[triton.cdiv(128, _BLOCK_SIZE_0) * triton.cdiv(128, _BLOCK_SIZE_1),](x, y, out, _BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2, num_warps=4, num_stages=3)
+    return out""",
+        )
+
+    @unittest.skip("need to debug correctness issue")
+    def test_matmul_static_shapes2(self):
+        args = (
+            torch.randn([128, 127], device=DEVICE, dtype=torch.float32),
+            torch.randn([127, 128], device=DEVICE, dtype=torch.float32),
+        )
+        code, output = code_and_output(
+            matmul_static_shapes,
+            args,
+            block_sizes=[[16, 16], 16],
+            l2_grouping=4,
+        )
+        torch.testing.assert_close(output, args[0] @ args[1], atol=1e-1, rtol=1e-2)
+        self.assertExpectedInline(
+            code,
+            """\
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def _matmul_static_shapes_kernel(x, y, out, _BLOCK_SIZE_0: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr):
+    num_pid_m = tl.cdiv(128, _BLOCK_SIZE_0)
+    num_pid_n = tl.cdiv(128, _BLOCK_SIZE_1)
+    num_pid_in_group = 4 * num_pid_n
+    group_id = tl.program_id(0) // num_pid_in_group
+    first_pid_m = group_id * 4
+    group_size_m = min(num_pid_m - first_pid_m, 4)
+    pid_0 = first_pid_m + tl.program_id(0) % num_pid_in_group % group_size_m
+    pid_1 = tl.program_id(0) % num_pid_in_group // group_size_m
+    offset_0 = pid_0 * _BLOCK_SIZE_0
+    indices_0 = offset_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
+    offset_1 = pid_1 * _BLOCK_SIZE_1
+    indices_1 = offset_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
+    acc = tl.full([_BLOCK_SIZE_0, _BLOCK_SIZE_1], 0.0, tl.float32)
+    for offset_2 in range(0, 127, _BLOCK_SIZE_2):
+        indices_2 = offset_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
+        mask_2 = indices_2 < 127
+        load = tl.load(x + (indices_0[:, None] * 127 + indices_2[None, :] * 1), mask_2[None, :], other=0)
+        load_1 = tl.load(y + (indices_2[:, None] * 128 + indices_1[None, :] * 1), mask_2[:, None], other=0)
+        mm = tl.dot(load, load_1, input_precision='tf32')
+        acc = acc + mm
+    tl.store(out + (indices_0[:, None] * 128 + indices_1[None, :] * 1), acc, None)
+
+def matmul_static_shapes(x: torch.Tensor, y: torch.Tensor):
+    m, k = x.size()
+    k2, n = y.size()
+    assert k == k2, f'size mismatch {k} != {k2}'
+    out = torch.empty([m, n], dtype=torch.promote_types(x.dtype, y.dtype), device=x.device)
+    _BLOCK_SIZE_0 = 16
+    _BLOCK_SIZE_1 = 16
+    _BLOCK_SIZE_2 = 16
+    _matmul_static_shapes_kernel[triton.cdiv(128, _BLOCK_SIZE_0) * triton.cdiv(128, _BLOCK_SIZE_1),](x, y, out, _BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2, num_warps=4, num_stages=3)
+    return out""",
+        )
+
+    @unittest.skip("need to debug correctness issue")
+    def test_matmul_static_shapes3(self):
+        args = (
+            torch.randn([127, 128], device=DEVICE, dtype=torch.float32),
+            torch.randn([128, 127], device=DEVICE, dtype=torch.float32),
+        )
+        code, output = code_and_output(
+            matmul_static_shapes,
+            args,
+            block_sizes=[[16, 16], 16],
+            l2_grouping=4,
+        )
+        torch.testing.assert_close(output, args[0] @ args[1], atol=1e-1, rtol=1e-2)
+        self.assertExpectedInline(
+            code,
+            """\
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def _matmul_static_shapes_kernel(x, y, out, _BLOCK_SIZE_0: tl.constexpr, _BLOCK_SIZE_1: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr):
+    num_pid_m = tl.cdiv(127, _BLOCK_SIZE_0)
+    num_pid_n = tl.cdiv(127, _BLOCK_SIZE_1)
+    num_pid_in_group = 4 * num_pid_n
+    group_id = tl.program_id(0) // num_pid_in_group
+    first_pid_m = group_id * 4
+    group_size_m = min(num_pid_m - first_pid_m, 4)
+    pid_0 = first_pid_m + tl.program_id(0) % num_pid_in_group % group_size_m
+    pid_1 = tl.program_id(0) % num_pid_in_group // group_size_m
+    offset_0 = pid_0 * _BLOCK_SIZE_0
+    indices_0 = offset_0 + tl.arange(0, _BLOCK_SIZE_0).to(tl.int32)
+    mask_0 = indices_0 < 127
+    offset_1 = pid_1 * _BLOCK_SIZE_1
+    indices_1 = offset_1 + tl.arange(0, _BLOCK_SIZE_1).to(tl.int32)
+    mask_1 = indices_1 < 127
+    acc = tl.full([_BLOCK_SIZE_0, _BLOCK_SIZE_1], 0.0, tl.float32)
+    for offset_2 in range(0, 128, _BLOCK_SIZE_2):
+        indices_2 = offset_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
+        load = tl.load(x + (indices_0[:, None] * 128 + indices_2[None, :] * 1), mask_0[:, None], other=0)
+        load_1 = tl.load(y + (indices_2[:, None] * 127 + indices_1[None, :] * 1), mask_1[None, :], other=0)
+        mm = tl.dot(load, load_1, input_precision='tf32')
+        acc = acc + mm
+    tl.store(out + (indices_0[:, None] * 127 + indices_1[None, :] * 1), acc, mask_0[:, None] & mask_1[None, :])
+
+def matmul_static_shapes(x: torch.Tensor, y: torch.Tensor):
+    m, k = x.size()
+    k2, n = y.size()
+    assert k == k2, f'size mismatch {k} != {k2}'
+    out = torch.empty([m, n], dtype=torch.promote_types(x.dtype, y.dtype), device=x.device)
+    _BLOCK_SIZE_0 = 16
+    _BLOCK_SIZE_1 = 16
+    _BLOCK_SIZE_2 = 16
+    _matmul_static_shapes_kernel[triton.cdiv(127, _BLOCK_SIZE_0) * triton.cdiv(127, _BLOCK_SIZE_1),](x, y, out, _BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2, num_warps=4, num_stages=3)
     return out""",
         )

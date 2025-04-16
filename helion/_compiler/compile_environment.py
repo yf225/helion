@@ -10,7 +10,6 @@ import sympy
 import torch
 from torch._dynamo.source import LocalSource
 from torch._inductor.utils import triton_type
-from torch._subclasses import FakeTensor
 from torch._subclasses import FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
@@ -51,11 +50,11 @@ class CompileEnvironment:
         self.shape_env = ShapeEnv(
             specialize_zero_one=True,
             duck_shape=False,
-            assume_static_by_default=False,
+            assume_static_by_default=settings.static_shapes,
         )
         # TODO(jansel): check for guards in the shapeenv
         self.fake_mode = FakeTensorMode(shape_env=self.shape_env)
-        self.input_sources: dict[FakeTensor, Source] = {}
+        self.input_sources: dict[torch.Tensor, Source] = {}
         self.block_sizes: list[BlockSizeInfo] = []
         self.debug_shape_renames: dict[sympy.Expr, sympy.Expr] = {}
         self.config_spec = ConfigSpec()
@@ -105,26 +104,38 @@ class CompileEnvironment:
     def to_fake(self, obj: object, source: Source) -> object:
         if isinstance(obj, torch.Tensor):
             return self._to_fake_tensor(obj, source)
-        if isinstance(obj, int):
-            with self.shape_env.ignore_fresh_unbacked_symbols():
-                return self.shape_env.create_unbacked_symint()
-        if isinstance(obj, float):
-            with self.shape_env.ignore_fresh_unbacked_symbols():
-                return self.shape_env.create_unbacked_symfloat()
-        if isinstance(obj, bool):
-            with self.shape_env.ignore_fresh_unbacked_symbols():
-                return self.shape_env.create_unbacked_symbool()
+        if self.settings.static_shapes:
+            if isinstance(obj, (int, float, bool)):
+                return obj
+        else:
+            if isinstance(obj, int):
+                with self.shape_env.ignore_fresh_unbacked_symbols():
+                    return self.shape_env.create_unbacked_symint()
+            if isinstance(obj, float):
+                with self.shape_env.ignore_fresh_unbacked_symbols():
+                    return self.shape_env.create_unbacked_symfloat()
+            if isinstance(obj, bool):
+                with self.shape_env.ignore_fresh_unbacked_symbols():
+                    return self.shape_env.create_unbacked_symbool()
         if isinstance(obj, (torch.dtype, torch.device)):
             return obj
         # TODO(jansel): support other types of args
         raise TypeError(f"unsupported argument type {type(obj)} ({source})")
 
-    def _to_fake_tensor(self, tensor: torch.Tensor, source: Source) -> FakeTensor:
+    def _to_fake_tensor(self, tensor: torch.Tensor, source: Source) -> torch.Tensor:
         assert CompileEnvironment.current() is self
         assert not self.fake_mode.is_our_fake(tensor)
-        result = self.fake_mode.fake_tensor_converter.from_real_tensor(
-            self.fake_mode, tensor, shape_env=self.shape_env, source=source
-        )
+        if self.settings.static_shapes:
+            result = torch.empty_strided(
+                tensor.size(),
+                tensor.stride(),
+                dtype=tensor.dtype,
+                device=tensor.device,
+            )
+        else:
+            result = self.fake_mode.fake_tensor_converter.from_real_tensor(
+                self.fake_mode, tensor, shape_env=self.shape_env, source=source
+            )
         self.input_sources[result] = source
         if isinstance(source, LocalSource):
             for i, s in enumerate(result.size()):
@@ -154,6 +165,11 @@ class CompileEnvironment:
                 return False
             return bool(res)
         return a == b
+
+    def known_multiple(self, a: sympy.Expr, b: int) -> bool:
+        if isinstance(a, (int, sympy.Integer)):
+            return (int(a) % b) == 0
+        return False
 
     def triton_index_type(self) -> str:
         """tl.int32 or tl.int64 depending on Settings()"""

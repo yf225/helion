@@ -56,7 +56,6 @@ class PointerIndexingStrategy(IndexingStrategy):
         extra = ", other=0" if indexing.has_mask() else ""
         name = state.device_function.tensor_arg(fake_tensor).name
         return expr_from_string(
-            # TODO(jansel): optimize away mask/other?
             f"tl.load({name} + offset, mask{extra})",
             offset=indexing.index_expr,
             mask=indexing.mask_expr,
@@ -91,8 +90,7 @@ class BlockPtrIndexingStrategy(IndexingStrategy):
         return indexing.reshape_load(
             state,
             expr_from_string(
-                # TODO(jansel): optimize away boundary_check
-                f"tl.load(block_ptr, boundary_check={indexing.boundary_check!r}, padding_option='zero')",
+                f"tl.load(block_ptr, boundary_check={indexing.boundary_check(state)}, padding_option='zero')",
                 block_ptr=indexing.make_block_ptr(state),
             ),
         )
@@ -106,8 +104,7 @@ class BlockPtrIndexingStrategy(IndexingStrategy):
             )
         indexing = BlockedSubscriptIndexing.create(state, fake_tensor, subscript)
         return expr_from_string(
-            # TODO(jansel): optimize away mask/other?
-            f"tl.store(block_ptr, value, boundary_check={indexing.boundary_check!r})",
+            f"tl.store(block_ptr, value, boundary_check={indexing.boundary_check(state)})",
             block_ptr=indexing.make_block_ptr(state),
             value=indexing.reshape_store(state, state.ast_arg(2)),
         )
@@ -274,15 +271,17 @@ class BlockedSubscriptIndexing:
             result[i] = order
         return result
 
-    @property
-    def boundary_check(self) -> list[int]:
-        env = CompileEnvironment.current()
+    def boundary_check(self, state: CodegenState) -> str:
         result = []
         for order, size in enumerate(self.block_shape):
-            # TODO(jansel): we could optimize this further
-            if not env.known_equal(size, 1):
+            if not (isinstance(size, int) and size == 1):
+                # TODO(jansel): we should be able to filter with something like:
+                # block_idx = TileStrategy.get_block_index(size)
+                # if block_idx is None or state.tile_strategy.need_mask(block_idx):
                 result.append(order)
-        return result
+        if result:
+            return repr(result)
+        return "None"
 
     def need_reshape(self) -> bool:
         if len(self.reshaped_size) != len(self.block_shape):

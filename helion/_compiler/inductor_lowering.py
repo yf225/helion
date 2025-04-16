@@ -389,5 +389,5 @@ class CodegenState(NamedTuple):
     def config(self) -> Config:
         return self.codegen.device_function.config
 
-    def add_statement(self, statement: ast.stmt | str) -> None:
+    def add_statement(self, statement: ast.AST | str) -> None:
         return self.codegen.add_statement(statement)
