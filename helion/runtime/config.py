@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from collections.abc import Mapping
+import json
+from pathlib import Path
 from typing import Literal
 from typing import cast
 
@@ -18,9 +20,9 @@ class Config(Mapping[str, object]):
         if config is not None:
             assert not kwargs
             assert isinstance(config, (dict, Config))
-            self.config: dict[str, object] = {**config}
+            self.config = {**config}
         else:
-            self.config: dict[str, object] = kwargs
+            self.config = kwargs
 
     def __getitem__(self, key: str) -> object:
         return self.config[key]
@@ -45,6 +47,25 @@ class Config(Mapping[str, object]):
 
     def __hash__(self) -> int:
         return hash(frozenset([(k, _list_to_tuple(v)) for k, v in self.config.items()]))
+
+    def to_json(self) -> str:
+        """Convert the config to a JSON string."""
+        return json.dumps(self.config, indent=2)
+
+    @classmethod
+    def from_json(cls, json_str: str) -> Config:
+        """Create a Config object from a JSON string."""
+        config_dict = json.loads(json_str)
+        return cls(config_dict)
+
+    def save(self, path: str | Path) -> None:
+        """Save the config to a JSON file."""
+        Path(path).write_text(self.to_json())
+
+    @classmethod
+    def load(cls, path: str | Path) -> Config:
+        """Load a config from a JSON file."""
+        return cls.from_json(Path(path).read_text())
 
     @property
     def block_sizes(self) -> list[int | list[int]]:

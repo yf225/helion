@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import random
+import tempfile
 from unittest.mock import patch
 
 from expecttest import TestCase
@@ -11,6 +12,7 @@ import helion
 from helion import _compat
 from helion._testing import DEVICE
 from helion._testing import import_path
+from helion.autotuner import DifferentialEvolutionSearch
 from helion.autotuner.config_generation import ConfigGeneration
 from helion.autotuner.random_search import RandomSearch
 import helion.language as hl
@@ -22,6 +24,10 @@ examples_matmul = import_path(examples_dir / "matmul.py").matmul
 
 
 class TestAutotuner(TestCase):
+    def setUp(self):
+        super().setUp()
+        random.seed(112)
+
     @patch.object(_compat, "_supports_tensor_descriptor", lambda: True)
     def test_config_fragment0(self):
         args = (
@@ -29,7 +35,6 @@ class TestAutotuner(TestCase):
             torch.randn([512, 512], device=DEVICE),
         )
         spec = examples_matmul.bind(args).config_spec
-        random.seed(112)
         configs = ConfigGeneration(spec).random_population(10)
         self.assertExpectedInline(
             "\n".join(map(repr, configs)),
@@ -53,7 +58,6 @@ helion.Config(block_sizes=[[16, 16], [16]], loop_orders=[[1, 0]], num_warps=4, n
             torch.randn([8, 512, 512], device=DEVICE),
         )
         spec = basic_kernels.add.bind(args).config_spec
-        random.seed(112)
         configs = ConfigGeneration(spec).random_population(10)
         self.assertExpectedInline(
             "\n".join(map(repr, configs)),
@@ -68,6 +72,45 @@ helion.Config(block_sizes=[[1, 16, 2]], loop_orders=[[0, 1, 2]], num_warps=4, nu
 helion.Config(block_sizes=[4096], loop_orders=[[1, 0, 2]], num_warps=1, num_stages=2, indexing='tensor_descriptor')
 helion.Config(block_sizes=[[1, 2, 1]], loop_orders=[[1, 0, 2]], num_warps=4, num_stages=7, indexing='block_ptr', use_yz_grid=False)
 helion.Config(block_sizes=[1], loop_orders=[[2, 1, 0]], num_warps=1, num_stages=8, indexing='block_ptr')""",
+        )
+
+    def test_save_load_config(self):
+        config = helion.Config(
+            block_sizes=[[64, 64], [32]],
+            loop_orders=[[1, 0]],
+            num_warps=2,
+            num_stages=1,
+            indexing="block_ptr",
+            l2_grouping=32,
+        )
+        with tempfile.NamedTemporaryFile() as f:
+            config.save(f.name)
+            loaded_config = helion.Config.load(f.name)
+            self.assertEqual(config, loaded_config)
+        self.assertExpectedInline(
+            config.to_json(),
+            """\
+{
+  "block_sizes": [
+    [
+      64,
+      64
+    ],
+    [
+      32
+    ]
+  ],
+  "loop_orders": [
+    [
+      1,
+      0
+    ]
+  ],
+  "num_warps": 2,
+  "num_stages": 1,
+  "indexing": "block_ptr",
+  "l2_grouping": 32
+}""",
         )
 
     def test_run_fixed_config(self):
@@ -117,7 +160,18 @@ helion.Config(block_sizes=[1], loop_orders=[[2, 1, 0]], num_warps=1, num_stages=
             torch.randn([512, 512], device=DEVICE),
         )
         bound_kernel = examples_matmul.bind(args)
-        random.seed(112)
         best = RandomSearch(bound_kernel, args, 5).autotune()
+        fn = bound_kernel.compile_config(best)
+        torch.testing.assert_close(fn(*args), args[0] @ args[1], rtol=1e-2, atol=1e-1)
+
+    def test_differential_evolution_search(self):
+        args = (
+            torch.randn([512, 512], device=DEVICE),
+            torch.randn([512, 512], device=DEVICE),
+        )
+        bound_kernel = examples_matmul.bind(args)
+        best = DifferentialEvolutionSearch(
+            bound_kernel, args, 5, num_generations=3
+        ).autotune()
         fn = bound_kernel.compile_config(best)
         torch.testing.assert_close(fn(*args), args[0] @ args[1], rtol=1e-2, atol=1e-1)

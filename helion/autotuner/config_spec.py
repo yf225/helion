@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from typing import Callable
 
 from torch._inductor.runtime.runtime_utils import next_power_of_2
+from torch._inductor.runtime.triton_heuristics import get_max_y_grid
 
 from ..exc import InvalidConfig
 from .config_fragment import BlockSizeFragment
@@ -79,13 +80,28 @@ class ConfigSpec:
         config.setdefault("num_stages", DEFAULT_NUM_STAGES)
         # TODO(jansel): include num_ctas and max_nreg
 
-        if self.block_size_specs:
-            if self.block_size_specs[0].allow_l2_grouping:
-                config.setdefault("l2_grouping", 1)
-            if 1 < len(self.block_size_specs[0]) <= 3:
-                config.setdefault("use_yz_grid", False)
-
+        if self.allow_l2_grouping:
+            config.setdefault("l2_grouping", 1)
+        if self.allow_use_yz_grid:
+            config.setdefault("use_yz_grid", False)
         config.setdefault("indexing", "pointer")
+
+    @property
+    def allow_l2_grouping(self) -> bool:
+        return (
+            len(self.block_size_specs) > 0
+            and self.block_size_specs[0].allow_l2_grouping
+        )
+
+    @property
+    def allow_use_yz_grid(self) -> bool:
+        return (
+            len(self.block_size_specs) > 0
+            and 1 < len(self.block_size_specs[0]) <= 3
+            and all(
+                s < get_max_y_grid() for s in self.block_size_specs[0].size_hints[1:]
+            )
+        )
 
     def normalize_block_sizes(self, block_sizes: object) -> list[int | list[int]]:
         if len(self.block_size_specs) == 0:
@@ -175,15 +191,12 @@ class ConfigSpec:
                 )
             ),
         }
-        if self.block_size_specs:
-            if self.block_size_specs[0].allow_l2_grouping:
-                config["l2_grouping"] = fn(PowerOfTwoFragment(1, 64, 1))
-            if 1 < len(self.block_size_specs[0]) <= 3:
-                use_yz_grid = fn(BooleanFragment())
-                if config.get("l2_grouping", 1) == 1 and isinstance(
-                    block_sizes[0], list
-                ):
-                    config["use_yz_grid"] = use_yz_grid
+        if self.allow_l2_grouping:
+            config["l2_grouping"] = fn(PowerOfTwoFragment(1, 64, 1))
+        if self.allow_use_yz_grid:
+            use_yz_grid = fn(BooleanFragment())
+            if config.get("l2_grouping", 1) == 1 and isinstance(block_sizes[0], list):
+                config["use_yz_grid"] = use_yz_grid
         return helion.Config(config)
 
 

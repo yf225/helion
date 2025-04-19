@@ -877,6 +877,7 @@ class TileIndexType(TypeInfo):
                 size_hints=[env.size_hint(x) for x in numels],
                 allow_flattened=len(numels) > 1,
                 allow_reorder=len(numels) > 1,
+                # TOOD(jansel): implement N-D l2 grouping
                 allow_l2_grouping=len(numels) == 2
                 and len(env.config_spec.block_size_specs) == 0,
             )

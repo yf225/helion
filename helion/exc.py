@@ -45,6 +45,10 @@ class NamingConflict(BaseError):
     message = "The variable name {} is reserved in Helion and cannot be used."
 
 
+class ClosuresNotSupported(BaseError):
+    message = "A closure ({0!r}) was found in the kernel. Closures are not supported."
+
+
 class LoopFunctionNotInFor(BaseError):
     message = "{0} must be called from a for loop, e.g. `for ... in {0}(...):"
 

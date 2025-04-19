@@ -124,6 +124,9 @@ class ConfigGeneration:
         self.shrink_config(config, PowerOfTwoFragment(1, 2048, 32).random())
         return config
 
+    def random_config(self) -> Config:
+        return self.unflatten(self.random_flat())
+
     def random_population_flat(self, n: int) -> list[FlatConfig]:
         return [self.default_flat(), *[self.random_flat() for _ in range(n - 1)]]
 

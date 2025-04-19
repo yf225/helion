@@ -67,6 +67,8 @@ def assert_no_conflicts(fn: FunctionType) -> None:
             our_val = scope[name]
             if user_val is not our_val:
                 raise exc.NamingConflict(name)
+    if fn.__code__.co_freevars:
+        raise exc.ClosuresNotSupported(fn.__code__.co_freevars)
 
 
 def reserved_names() -> list[str]:
