@@ -32,6 +32,9 @@ class Config(Mapping[str, object]):
         return len(self.config)
 
     def __repr__(self) -> str:
+        return f"helion.{self.__str__()}"
+
+    def __str__(self) -> str:
         args = [f"{key}={value!r}" for key, value in self.config.items()]
         return f"Config({', '.join(args)})"
 
@@ -41,7 +44,7 @@ class Config(Mapping[str, object]):
         return self.config == other.config
 
     def __hash__(self) -> int:
-        return hash(frozenset(self.config.items()))
+        return hash(frozenset([(k, _list_to_tuple(v)) for k, v in self.config.items()]))
 
     @property
     def block_sizes(self) -> list[int | list[int]]:
@@ -70,3 +73,9 @@ class Config(Mapping[str, object]):
     @property
     def indexing(self) -> IndexingLiteral:
         return cast("IndexingLiteral", self.config.get("indexing", "pointer"))
+
+
+def _list_to_tuple(x: object) -> object:
+    if isinstance(x, list):
+        return tuple([_list_to_tuple(i) for i in x])
+    return x

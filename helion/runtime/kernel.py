@@ -45,7 +45,7 @@ class Kernel:
         self.signature: inspect.Signature = inspect.signature(fn)
         self.settings: Settings = settings or Settings.default()
         # pyre-fixme[11]: BoundKernel undefined?
-        self.bound_kernels: dict[Hashable, BoundKernel] = {}
+        self._bound_kernels: dict[Hashable, BoundKernel] = {}
         if any(
             param.kind
             in (
@@ -70,7 +70,7 @@ class Kernel:
             assert isinstance(args, list), "args must be a tuple or list"
             args = tuple(args)
         signature = self._specialization_key(args)
-        bound_kernel = self.bound_kernels.get(signature)
+        bound_kernel = self._bound_kernels.get(signature)
         if bound_kernel is None:
             normalized_args: tuple[object, ...] = self.normalize_args(*args)
             if len(normalized_args) != len(args):
@@ -78,10 +78,19 @@ class Kernel:
                 bound_kernel = self.bind(normalized_args)
             else:
                 bound_kernel = BoundKernel(self, args)
-            self.bound_kernels[signature] = bound_kernel
+            self._bound_kernels[signature] = bound_kernel
         return bound_kernel
 
     def _specialization_key(self, obj: object) -> Hashable:
+        """
+        Generate a specialization key for the given arg.
+
+        This method determines a unique key for the object based on its type
+        and the corresponding extractor function defined in `_specialization_extractors`.
+
+        :param obj: The argument to generate a specialization key for.
+        :return: A hashable key representing the specialization of the object.
+        """
         try:
             extractor = _specialization_extractors[type(obj)]
         except KeyError:
@@ -114,27 +123,73 @@ class Kernel:
             args = self.normalize_args(*args, **kwargs)
         return self.bind(args)(*args)
 
+    def reset(self) -> None:
+        """
+        Clears the cache of bound kernels, meaning subsequent calls will
+        recompile and re-autotune.
+        """
+        self._bound_kernels.clear()
+
 
 class BoundKernel:
     # pyre-fixme[11]: Kernel undefined?
     def __init__(self, kernel: Kernel, args: tuple[object, ...]) -> None:
+        """
+        Initialize a BoundKernel object.
+
+        This constructor sets up the environment, compiles the kernel function, and prepares
+        the arguments for execution.
+
+        :param kernel: The Kernel object to bind.
+        :type kernel: Kernel
+        :param args: A tuple of arguments to bind to the kernel.
+        :type args: tuple[object, ...]
+        """
         super().__init__()
         self.kernel = kernel
-        self.env = CompileEnvironment(_extract_device(args), self.kernel.settings)
+        self._run: Callable[..., object] | None = None
+        self._compile_cache: dict[Config, Callable[..., object]] = {}
+        self.env = CompileEnvironment(_find_device(args), self.kernel.settings)
         with self.env:
             assert len(args) == len(self.kernel.signature.parameters)
             self.fake_args: list[object] = [
-                # TODO(jansel): support hl.constexpr
+                # TODO(jansel): Support hl.constexpr
                 self.env.to_fake(arg, LocalSource(name))
                 for name, arg in zip(self.kernel.signature.parameters, args)
             ]
             self.host_fn: HostFunction = HostFunction(self.kernel.fn, self.fake_args)
+        if (configs := self.settings.configs) is not None and len(configs) == 1:
+            self.set_config(configs[0])
+
+    @property
+    def settings(self) -> Settings:
+        """
+        Retrieve the settings associated with the kernel.
+
+        :return: The settings of the kernel.
+        :rtype: Settings
+        """
+        return self.kernel.settings
 
     @property
     def config_spec(self) -> ConfigSpec:
+        """
+        Retrieve the configuration specification for the kernel.
+
+        :return: The configuration specification.
+        :rtype: ConfigSpec
+        """
         return self.env.config_spec
 
     def to_triton_code(self, config: ConfigLike) -> str:
+        """
+        Generate Triton code for the kernel based on the given configuration.
+
+        :param config: The configuration to use for code generation.
+        :type config: Config or dict[str, object]
+        :return: The generated Triton code as a string.
+        :rtype: str
+        """
         with self.env:
             config = Config(config)
             self.env.config_spec.normalize(config)
@@ -142,15 +197,123 @@ class BoundKernel:
             return get_needed_imports(root) + ast.unparse(root)
 
     def compile_config(self, config: ConfigLike) -> Callable[..., object]:
+        """
+        Compile the kernel for a specific configuration.
+
+        :param config: The configuration to compile the kernel with.
+        :type config: Config or dict[str, object]
+        :return: A callable object representing the compiled kernel.
+        :rtype: Callable[..., object]
+        """
+        if not isinstance(config, Config):
+            config = Config(config)
+        if (rv := self._compile_cache.get(config)) is not None:
+            return rv
         module = PyCodeCache.load(self.to_triton_code(config))
-        return getattr(module, self.kernel.name)
+        rv = getattr(module, self.kernel.name)
+        self._compile_cache[config] = rv
+        return rv
 
     def _debug_str(self) -> str:
+        """
+        Generate a debug string for the kernel.
+
+        :return: A string containing debug information about the kernel.
+        :rtype: str
+        """
         with self.env:
             return self.host_fn.debug_str()
 
+    def autotune(
+        self,
+        args: Sequence[object],
+        **kwargs: object,
+    ) -> Config:
+        """
+        Perform autotuning to find the optimal configuration for
+        the kernel.  This uses the default setting, you can call
+        helion.autotune.* directly for more customization.
+
+        Mutates self so that `__call__` will run the best config found.
+
+        :param args: Example arguments used for benchmarking durring autotuning.
+        :type args: list[object]
+        :return: The best configuration found during autotuning.
+        :rtype: Config
+        """
+        if self.settings.configs:
+            from ..autotuner import FiniteSearch
+
+            config = FiniteSearch(
+                self, args, [*map(Config, self.settings.configs)]
+            ).autotune()
+        else:
+            from ..autotuner import DifferentialEvolutionSearch
+
+            config = DifferentialEvolutionSearch(
+                self,
+                args,
+                # pyre-ignore[6]
+                **kwargs,
+            ).autotune()
+        self.set_config(config)
+        return config
+
+    def set_config(self, config: ConfigLike) -> None:
+        """
+        Set the configuration for the kernel and compile it.
+
+        Mutates self so that `__call__` will run the provided config.
+
+        :param config: The configuration to set.
+        :type config: ConfigLike
+        """
+        if not isinstance(config, Config):
+            config = Config(config)
+        self._run = self.compile_config(config)
+
     def __call__(self, *args: object) -> object:
-        raise NotImplementedError
+        """
+        Execute the kernel with the given arguments.
+
+        :param args: The arguments to pass to the kernel.
+        :type args: object
+        :return: The result of the kernel execution.
+        :rtype: object
+        """
+        if self._run is None:
+            self.autotune(args)
+            assert self._run is not None
+        return self._run(*args)
+
+
+@overload
+def kernel(fn: Callable[..., object], **settings: object) -> Kernel: ...
+
+
+@overload
+def kernel(
+    fn: None = None, **settings: object
+) -> Callable[[Callable[..., object]], Kernel]: ...
+
+
+def kernel(fn: Callable[..., object] | None = None, **settings: object) -> object:
+    """
+    Decorator to create a Kernel object from a Python function.
+
+    :param fn: The function to be wrapped by the Kernel. If None, a decorator is returned.
+    :param settings: Keyword arguments representing settings for the Kernel.
+                    Can also use settings=Settings(...) to pass a Settings object directly.
+    :return: A Kernel object or a decorator that returns a Kernel object.
+    """
+    if fn is None:
+        return functools.partial(kernel, **settings)
+    if settings_obj := settings.pop("settings", None):
+        assert len(settings) == 0, "settings must be the only keyword argument"
+        assert isinstance(settings_obj, Settings), "settings must be a Settings object"
+    else:
+        settings_obj = Settings(**settings)
+    return Kernel(fn, settings_obj)
 
 
 def _tensor_key(fn: Kernel, obj: torch.Tensor) -> Hashable:
@@ -196,7 +359,7 @@ _specialization_extractors: dict[type[object], Callable[[Kernel, object], Hashab
 }
 
 
-def _extract_device(args: tuple[object, ...]) -> torch.device:
+def _find_device(args: tuple[object, ...]) -> torch.device:
     """
     Extract the device from the arguments.
 
@@ -209,42 +372,13 @@ def _extract_device(args: tuple[object, ...]) -> torch.device:
         if isinstance(arg, (tuple, list)):
             for item in arg:
                 try:
-                    return _extract_device(item)
+                    return _find_device(item)
                 except exc.NoTensorArgs:
                     pass
         elif isinstance(arg, dict):
             for item in arg.values():
                 try:
-                    return _extract_device(item)
+                    return _find_device(item)
                 except exc.NoTensorArgs:
                     pass
     raise exc.NoTensorArgs
-
-
-@overload
-def kernel(fn: Callable[..., object], **settings: object) -> Kernel: ...
-
-
-@overload
-def kernel(
-    fn: None = None, **settings: object
-) -> Callable[[Callable[..., object]], Kernel]: ...
-
-
-def kernel(fn: Callable[..., object] | None = None, **settings: object) -> object:
-    """
-    Decorator to create a Kernel object from a Python function.
-
-    :param fn: The function to be wrapped by the Kernel. If None, a decorator is returned.
-    :param settings: Keyword arguments representing settings for the Kernel.
-                    Can also use settings=Settings(...) to pass a Settings object directly.
-    :return: A Kernel object or a decorator that returns a Kernel object.
-    """
-    if fn is None:
-        return functools.partial(kernel, **settings)
-    if settings_obj := settings.pop("settings", None):
-        assert len(settings) == 0, "settings must be the only keyword argument"
-        assert isinstance(settings_obj, Settings), "settings must be a Settings object"
-    else:
-        settings_obj = Settings(**settings)
-    return Kernel(fn, settings_obj)

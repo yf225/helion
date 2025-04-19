@@ -22,6 +22,23 @@ if TYPE_CHECKING:
 _tls: _TLS = cast("_TLS", threading.local())
 
 
+class LogLevel:
+    """
+    Enumeration for log levels used in the search algorithms.
+
+    Attributes:
+        OFF (0): No logging.
+        SUMMARY (10): Log summary information.
+        INFO (20): Log informational messages.
+        DEBUG (30): Log detailed debug messages.
+    """
+
+    OFF = 0
+    SUMMARY = 10
+    INFO = 20
+    DEBUG = 30
+
+
 def set_default_settings(settings: Settings) -> AbstractContextManager[None, None]:
     """
     Set the default settings for the current thread and return a context manager
@@ -53,13 +70,13 @@ class _Settings:
     index_dtype: torch.dtype = torch.int32
     dot_precision: Literal["tf32", "tf32x3", "ieee"] = "tf32"
     static_shapes: bool = False
+    autotune_log_level: int = LogLevel.INFO
 
 
 class Settings(_Settings):
     """
     Settings can be passed to hl.kernel as kwargs and control the behavior of the
-    compilation process. Unlike a Config, settings are not auto-tuned and are
-    expected to be set by the user.
+    compilation process. Unlike a Config, settings are not auto-tuned and set by the user.
     """
 
     __slots__: dict[str, str] = {
@@ -68,6 +85,7 @@ class Settings(_Settings):
         "index_dtype": "The dtype to use for index variables. Default is torch.int32.",
         "dot_precision": "Precision for dot products, see `triton.language.dot`. Can be 'tf32', 'tf32x3', or 'ieee'.",
         "static_shapes": "If True, use static shapes for all tensors. This is a performance optimization.",
+        "autotune_log_level": "Log level for autotuning. 0 = no logging, 1 = only final config, 2 = default, 3 = verbose.",
     }
     assert __slots__.keys() == {field.name for field in dataclasses.fields(_Settings)}
 

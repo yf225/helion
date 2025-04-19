@@ -30,6 +30,7 @@ from torch.fx.interpreter import Interpreter
 from torch.fx.node import Node
 from torch.fx.node import map_arg
 
+from .._compat import min_dot_size
 from ..exc import InductorLoweringError
 from ..language._decorators import APIFunc
 from ..language._decorators import is_api_func
@@ -37,12 +38,13 @@ from .ast_extension import create
 from .ast_extension import expr_from_string
 from .ast_extension import statement_from_string
 from .compile_environment import CompileEnvironment
+from .tile_strategy import TileStrategy
+from .tile_strategy import TileStrategyDispatch
 
 if TYPE_CHECKING:
     from .. import Config
     from .device_function import DeviceFunction
     from .generate_ast import GenerateAST
-    from .tile_strategy import TileStrategyDispatch
 
     CodegenHandler = Callable[["GraphInterpreter", torch.fx.Node], object]
 
@@ -78,7 +80,7 @@ def prepare_node_lowering(
         return APIFuncLowering(api)
 
     if node.target in aten_lowering_dispatch:
-        return aten_lowering_dispatch[node.target]()
+        return aten_lowering_dispatch[node.target](node)
 
     def convert_arg(arg: Node) -> TensorBox:
         example = arg.meta["val"]
@@ -233,48 +235,25 @@ class LambdaLowering(Lowering):
         return self.fn(ctx, node)
 
 
-aten_lowering_dispatch: dict[object, Callable[[], Lowering]] = {}
+aten_lowering_dispatch: dict[object, Callable[[torch.fx.Node], Lowering]] = {}
+
+
+def default_make_lowering(handler: CodegenHandler, node: torch.fx.Node) -> Lowering:
+    return LambdaLowering(handler)
 
 
 def register_lowering(
     fn: object,
+    make_lowering: Callable[
+        [CodegenHandler, torch.fx.Node], Lowering
+    ] = default_make_lowering,
 ) -> Callable[[CodegenHandler], CodegenHandler]:
     def decorator(handler: CodegenHandler) -> CodegenHandler:
         assert fn not in aten_lowering_dispatch, f"Lowering for {fn} already registered"
-        aten_lowering_dispatch[fn] = lambda: LambdaLowering(handler)
+        aten_lowering_dispatch[fn] = lambda node: make_lowering(handler, node)
         return handler
 
     return decorator
-
-
-# pyre-fixme[56]
-@register_lowering(torch.ops.aten.mm.default)
-def codegen_mm(ctx: GraphInterpreter, node: torch.fx.Node) -> ast.AST:
-    assert not node.kwargs, "matmul kwargs not supported"
-    lhs, rhs = map_arg(node.args, lambda arg: ctx.env[arg])
-    assert isinstance(lhs, ast.AST)
-    assert isinstance(rhs, ast.AST)
-    tf32 = CompileEnvironment.current().settings.dot_precision
-    return expr_from_string(
-        f"tl.dot(lhs, rhs, input_precision={tf32!r})", lhs=lhs, rhs=rhs
-    )
-
-
-# pyre-fixme[56]
-@register_lowering(torch.ops.aten.addmm.default)
-def codegen_addmm(ctx: GraphInterpreter, node: torch.fx.Node) -> ast.AST:
-    assert not node.kwargs, "addmm kwargs not supported"
-    acc, lhs, rhs = map_arg(node.args, lambda arg: ctx.env[arg])
-    assert isinstance(acc, ast.AST)
-    assert isinstance(lhs, ast.AST)
-    assert isinstance(rhs, ast.AST)
-    tf32 = CompileEnvironment.current().settings.dot_precision
-    return expr_from_string(
-        f"tl.dot(lhs, rhs, acc=acc, input_precision={tf32!r})",
-        lhs=lhs,
-        rhs=rhs,
-        acc=acc,
-    )
 
 
 # pyre-fixme[56]
@@ -294,6 +273,54 @@ def codegen_getitem(ctx: GraphInterpreter, node: torch.fx.Node) -> object:
     assert isinstance(lhs, (list, tuple))
     assert isinstance(rhs, int)
     return lhs[rhs]
+
+
+def apply_dot_requirements(handler: CodegenHandler, node: torch.fx.Node) -> Lowering:
+    """Apply min_dot_size requirements to the config_spec"""
+    assert not node.kwargs, "dot kwargs not supported"
+    assert len(node.args) in (2, 3)
+    lproxy, rproxy = map_arg(node.args[-2:], lambda arg: arg.meta["val"])
+    assert isinstance(lproxy, torch.Tensor)
+    assert isinstance(rproxy, torch.Tensor)
+    n, k = lproxy.size()
+    _, m = rproxy.size()
+    a, b, c = min_dot_size(lproxy.device, lproxy.dtype, rproxy.dtype)
+    env = CompileEnvironment.current()
+    for shape, min_size in [(n, a), (k, b), (m, c)]:
+        block_idx = TileStrategy.get_block_index(shape)
+        if block_idx is not None:
+            env.config_spec.update_min_block(block_idx, min_size, allow_flattened=False)
+    return LambdaLowering(handler)
+
+
+# pyre-fixme[56]
+@register_lowering(torch.ops.aten.mm.default, apply_dot_requirements)
+def codegen_mm(ctx: GraphInterpreter, node: torch.fx.Node) -> ast.AST:
+    assert not node.kwargs, "matmul kwargs not supported"
+    lhs, rhs = map_arg(node.args, lambda arg: ctx.env[arg])
+    assert isinstance(lhs, ast.AST)
+    assert isinstance(rhs, ast.AST)
+    tf32 = CompileEnvironment.current().settings.dot_precision
+    return expr_from_string(
+        f"tl.dot(lhs, rhs, input_precision={tf32!r})", lhs=lhs, rhs=rhs
+    )
+
+
+# pyre-fixme[56]
+@register_lowering(torch.ops.aten.addmm.default, apply_dot_requirements)
+def codegen_addmm(ctx: GraphInterpreter, node: torch.fx.Node) -> ast.AST:
+    assert not node.kwargs, "addmm kwargs not supported"
+    acc, lhs, rhs = map_arg(node.args, lambda arg: ctx.env[arg])
+    assert isinstance(acc, ast.AST)
+    assert isinstance(lhs, ast.AST)
+    assert isinstance(rhs, ast.AST)
+    tf32 = CompileEnvironment.current().settings.dot_precision
+    return expr_from_string(
+        f"tl.dot(lhs, rhs, acc=acc, input_precision={tf32!r})",
+        lhs=lhs,
+        rhs=rhs,
+        acc=acc,
+    )
 
 
 class GenerateASTFromInductor(DefaultHandler):

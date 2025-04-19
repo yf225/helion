@@ -13,7 +13,6 @@ from torch._inductor.utils import triton_type
 from torch._subclasses import FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
-from ..autotuner import ConfigSpec
 from .error_reporting import ErrorReporting
 from .variable_origin import BlockSizeOrigin
 
@@ -43,6 +42,8 @@ class CompileEnvironment:
     """
 
     def __init__(self, device: torch.device, settings: Settings) -> None:
+        from ..autotuner.config_spec import ConfigSpec
+
         super().__init__()
         self.device = device
         self.settings = settings

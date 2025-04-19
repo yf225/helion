@@ -139,6 +139,10 @@ class TracedArgNotSupported(BaseError):
     message = "{!s} is not supported as an arg to traced functions."
 
 
+class NotEnoughConfigs(BaseError):
+    message = "FiniteSearch requires at least two configs, but got {0}."
+
+
 class CantCombineTypesInControlFlow(BaseError):
     message = "Cannot combine types for {0!r} in control flow: {1} and {2}"
 
@@ -206,6 +210,10 @@ class InternalError(_WrapException):
 
 class TorchOpTracingError(_WrapException):
     pass
+
+
+class TritonError(BaseError):
+    message = "Error running generated Triton program:\n{1}\n{0}"
 
 
 class BaseWarning(_FixedMessage):

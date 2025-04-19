@@ -13,7 +13,8 @@
   "python_version": "3.9",
   "search_path": [
       "../pytorch",
-      {"site-package": "sympy"}
+      {"site-package": "sympy"},
+      {"site-package": "triton"}
   ],
   "exclude": [".*third_party.*"],
   "strict": true

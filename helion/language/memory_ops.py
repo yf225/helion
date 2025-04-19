@@ -21,6 +21,18 @@ def store(tensor: torch.Tensor, index: list[object], value: torch.Tensor) -> Non
     raise exc.NotInsideKernel
 
 
+@_decorators.prepare_args(store)
+def _(
+    tensor: torch.Tensor, index: list[object], value: torch.Tensor
+) -> tuple[torch.Tensor, list[object], torch.Tensor]:
+    from helion._compiler.tile_index_proxy import TileIndexProxy
+
+    if value.dtype != tensor.dtype:
+        value = value.to(tensor.dtype)
+    index = TileIndexProxy.tiles_to_sizes(index)
+    return (tensor, index, value)
+
+
 @_decorators.register_fake(store)
 def _(tensor: torch.Tensor, index: list[object], value: torch.Tensor) -> None:
     return None

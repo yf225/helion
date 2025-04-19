@@ -109,7 +109,7 @@ def _matmul_kernel(x, y, out, out_stride_0, out_stride_1, x_stride_0, x_stride_1
         acc = tl.dot(load, load_1, acc=acc, input_precision='tf32')
     tl.store(out + (indices_0[:, None] * out_stride_0 + indices_1[None, :] * out_stride_1), acc, mask_0[:, None] & mask_1[None, :])
 
-def matmul(x: torch.Tensor, y: torch.Tensor, acc_dtype: torch.dtype=torch.float32):
+def matmul(x: torch.Tensor, y: torch.Tensor):
     m, k = x.size()
     k2, n = y.size()
     assert k == k2, f'size mismatch {k} != {k2}'
