@@ -40,6 +40,7 @@ from .variable_origin import GlobalOrigin
 from .variable_origin import Origin
 from .variable_origin import SourceOrigin
 from .variable_origin import TensorSizeOrigin
+import helion
 
 # pyre-ignore-all-errors[8,15,58]: visit_* overrides
 if TYPE_CHECKING:
@@ -73,10 +74,7 @@ class GlobalScope(Scope):
         return self.cache[name]
 
     def _get(self, name: str) -> TypeInfo:
-        origin = GlobalOrigin(name=name, function=self.function)
         try:
-            # TODO(jansel): record global access and maybe specialize
-            # TODO(jansel): make this not specialize int/float/bool
             value = self.function.fn.__globals__[name]
         except KeyError:
             if hasattr(builtins, name):
@@ -84,6 +82,24 @@ class GlobalScope(Scope):
                 origin = BuiltinOrigin(name=name, function=self.function)
             else:
                 raise exc.UndefinedVariable(name) from None
+        else:
+            if value is torch and name == "torch" or value is helion.language:
+                origin = GlobalOrigin(name=name, function=self.function)
+                return TypeInfo.from_example(value, origin)
+
+            origin = self.function.global_scope_origin(name)
+            if not isinstance(
+                value,
+                (types.ModuleType, types.FunctionType, types.BuiltinFunctionType),
+            ):
+                value = CompileEnvironment.current().to_fake(value, origin.to_source())
+                if isinstance(value, torch.Tensor):
+                    self.function.tensor_to_origin[value] = origin
+                elif isinstance(value, (torch.SymInt, torch.SymFloat, torch.SymBool)):
+                    if isinstance(symbol := value._sympy_(), sympy.Symbol):
+                        self.function.symbol_to_origin[symbol.name] = SymbolOrigin(
+                            origin
+                        )
         return TypeInfo.from_example(value, origin)
 
     def set(self, name: str, type_info: TypeInfo) -> NoReturn:

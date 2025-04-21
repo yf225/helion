@@ -361,7 +361,7 @@ class NDTileStrategy(TileStrategy):
 
     def _setup_mask(
         self, state: CodegenState, block_idx: int, block_size: int, index_var: str
-    ) -> ast.AST | None:
+    ) -> ast.stmt | None:
         env = CompileEnvironment.current()
         numel = env.block_sizes[block_idx].numel
         if block_size == 1 or env.known_multiple(numel, block_size):

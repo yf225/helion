@@ -7,6 +7,7 @@ import torch
 
 from .._compiler.ast_extension import expr_from_string
 from .._compiler.host_function import HostFunction
+from .._compiler.tile_strategy import TileStrategy
 from . import _decorators
 
 if TYPE_CHECKING:
@@ -27,7 +28,15 @@ def _get_symnode(debug_name: str) -> int:
 
 @_decorators.codegen(_get_symnode)
 def _(state: CodegenState) -> ast.AST:
-    return expr_from_string("_get_symnode")  # should be unused
+    val = state.fx_node.meta["val"]
+    assert isinstance(val, (torch.SymInt, torch.SymFloat, torch.SymBool)), val
+    if (block_idx := TileStrategy.get_block_index(val)) is not None:
+        if state.device_function.tile_strategy.block_size_var(block_idx) is None:
+            # this should be unused
+            return expr_from_string("block_size_var_optimized_away")
+    return state.codegen.lift(
+        expr_from_string(state.device_function.sympy_expr(val._sympy_())), dce=True
+    )
 
 
 @_decorators.api()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import sys
 import textwrap
 import threading
 import typing
@@ -14,10 +15,14 @@ import torch
 from torch._inductor.codegen.wrapper import pexpr
 
 from . import ast_extension
+from .ast_extension import statement_from_string
 from .compile_environment import CompileEnvironment
+from .output_header import SOURCE_MODULE
 from .source_location import SourceLocation
 from .source_location import UnknownLocation
 from .type_printer import print_ast
+from .variable_origin import AttributeOrigin
+from .variable_origin import GlobalOrigin
 from .variable_origin import NameOrigin
 from .variable_origin import Origin
 
@@ -31,6 +36,25 @@ if TYPE_CHECKING:
 
 
 tls: _TLS = typing.cast("_TLS", threading.local())
+
+
+class GlobalImport(NamedTuple):
+    value: object
+    module: str
+    member: str | None = None
+    alias: str | None = None
+
+    def __repr__(self) -> str:
+        return f"<GlobalImport '{self.codegen()}'>"
+
+    def codegen(self) -> str:
+        if self.member is not None:
+            if self.alias is not None:
+                return f"from {self.module} import {self.member} as {self.alias}"
+            return f"from {self.module} import {self.member}"
+        if self.alias is not None:
+            return f"import {self.module} as {self.alias}"
+        return f"import {self.module}"
 
 
 class SymbolOrigin(NamedTuple):
@@ -50,6 +74,7 @@ class HostFunction:
         self.local_types: dict[str, TypeInfo] | None = None
         self.symbol_to_origin: dict[str, SymbolOrigin] = {}
         self.tensor_to_origin: dict[torch.Tensor, Origin] = {}
+        self.global_imports: dict[str, GlobalImport] = {}
         with self:
             source_indented = inspect.getsource(fn)
             source = textwrap.dedent(source_indented)
@@ -75,6 +100,19 @@ class HostFunction:
 
             # TODO(jansel): assert we don't have any extra decorators
             # TODO(jansel): check type annotations for hl.constexpr/hl.specialize
+
+    def global_scope_origin(self, name: str) -> AttributeOrigin:
+        if SOURCE_MODULE not in self.global_imports:
+            module_name = self.fn.__globals__["__name__"]
+            module = sys.modules[module_name]
+            assert module.__dict__ is self.fn.__globals__
+            self.global_imports[SOURCE_MODULE] = GlobalImport(
+                value=module,
+                module=module_name,
+                member=None,
+                alias=SOURCE_MODULE,
+            )
+        return AttributeOrigin(GlobalOrigin(SOURCE_MODULE), name)
 
     def __repr__(self) -> str:
         return f"<HostFunction {self.name}>"
@@ -122,6 +160,12 @@ class HostFunction:
             body=statements,
             decorator_list=[],
         )
+
+    def codegen_imports(self) -> list[ast.stmt]:
+        return [
+            statement_from_string(line.codegen())
+            for line in self.global_imports.values()
+        ]
 
     def __enter__(self) -> None:
         try:

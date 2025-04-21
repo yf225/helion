@@ -197,8 +197,8 @@ class DeviceFunction:
             return self.sympy_expr(expr)
         return repr(expr)
 
-    def unique_name(self, prefix: str) -> str:
-        return self.new_var(f"{prefix}_{next(self._unique_counter[prefix])}")
+    def unique_name(self, prefix: str, dce: bool = False) -> str:
+        return self.new_var(f"{prefix}_{next(self._unique_counter[prefix])}", dce=dce)
 
     def new_var(self, name: str, *, dce: bool = False) -> str:
         name = self.namespace.create_name(name, None)

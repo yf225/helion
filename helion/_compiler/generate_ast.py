@@ -10,6 +10,7 @@ from .ast_extension import ExtendedAST
 from .ast_extension import LoopType
 from .ast_extension import NodeVisitor
 from .ast_extension import create
+from .ast_extension import expr_from_string
 from .ast_extension import statement_from_string
 from .compile_environment import CompileEnvironment
 from .device_function import DeviceFunction
@@ -37,15 +38,15 @@ class GenerateAST(NodeVisitor):
             stmt = statement_from_string(stmt)
         self.statements_stack[-1].append(stmt)
 
-    def tmpvar(self) -> str:
-        return self.device_function.unique_name("v")
+    def tmpvar(self, dce: bool = False) -> str:
+        return self.device_function.unique_name("v", dce=dce)
 
-    def lift(self, expr: ast.AST) -> ast.Name:
+    def lift(self, expr: ast.AST, dce: bool = False) -> ast.Name:
         if isinstance(expr, ast.Name):
             return expr
         assert isinstance(expr, ExtendedAST)
         with expr:
-            varname = self.tmpvar()
+            varname = self.tmpvar(dce=dce)
             self.add_statement(statement_from_string(f"{varname} = expr", expr=expr))
             return create(ast.Name, id=varname, ctx=ast.Load())
 
@@ -128,6 +129,15 @@ class GenerateAST(NodeVisitor):
             return self.device_function.codegen_function_call()
         return self.generic_visit(node)
 
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        assert isinstance(node, ExtendedAST)
+        if isinstance(node.ctx, ast.Load) and node._type_info is not None:
+            origin = node._type_info.origin
+            if origin.is_global() or origin.is_closure():
+                # `x` => `_original_globals.x`
+                return expr_from_string(origin.host_str())
+        return node
+
 
 class TensorReference(NamedTuple):
     node: ast.AST
@@ -159,6 +169,7 @@ def generate_ast(func: HostFunction, config: Config) -> ast.AST:
             CompileEnvironment.current().errors.raise_if_errors()
             return ast.Module(
                 [
+                    *func.codegen_imports(),
                     codegen.device_function.codegen_function_def(),
                     func.codegen_function_def(codegen.host_statements),
                 ],

@@ -84,10 +84,27 @@ def prepare_node_lowering(
 
     def convert_arg(arg: Node) -> TensorBox:
         example = arg.meta["val"]
+        input_names.append(name := f"{node.name}_input{len(input_names)}")
+        if isinstance(example, (torch.SymInt, torch.SymFloat, torch.SymBool)):
+            dtype = {
+                torch.SymInt: torch.int64,
+                torch.SymFloat: torch.float32,
+                torch.SymBool: torch.bool,
+            }[type(example)]
+            return TensorBox.create(
+                InputBuffer(
+                    name=name,
+                    layout=FixedLayout(
+                        CompileEnvironment.current().device,
+                        dtype,
+                        [],
+                        [],
+                    ),
+                )
+            )
         assert isinstance(example, torch.Tensor), (
             f"Expected Tensor, got {type(example)}: {node.target}"
         )
-        input_names.append(name := f"{node.name}_input{len(input_names)}")
         return TensorBox.create(
             InputBuffer(
                 name=name,

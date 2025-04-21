@@ -9,14 +9,7 @@ if TYPE_CHECKING:
     import ast
     from types import FunctionType
 
-OUTPUT_CODE_HEADER = """\
-import torch
-import triton
-from triton import language as tl
-from torch._inductor.runtime.triton_helpers import math as tl_math
-from triton.tools.experimental_descriptor import TensorDescriptor
-
-"""
+SOURCE_MODULE: str = "_source_module"
 
 library_imports: dict[str, str] = {
     "torch": "import torch",
@@ -27,6 +20,11 @@ library_imports: dict[str, str] = {
     "tl_math": "from torch._inductor.runtime.triton_helpers import math as tl_math",
     "TensorDescriptor": "from triton.tools.experimental_descriptor import TensorDescriptor",
 }
+disallowed_names: dict[str, None] = dict.fromkeys(
+    [
+        SOURCE_MODULE,
+    ]
+)
 
 
 def get_needed_imports(root: ast.AST) -> str:
@@ -67,6 +65,8 @@ def assert_no_conflicts(fn: FunctionType) -> None:
             our_val = scope[name]
             if user_val is not our_val:
                 raise exc.NamingConflict(name)
+        if name in disallowed_names:
+            raise exc.NamingConflict(name)
     if fn.__code__.co_freevars:
         raise exc.ClosuresNotSupported(fn.__code__.co_freevars)
 

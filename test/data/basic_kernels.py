@@ -1,6 +1,8 @@
 import helion
 import helion.language as hl
 import torch
+from torch import empty_like
+from helion._testing import DEVICE
 
 
 @helion.kernel
@@ -49,4 +51,19 @@ def pointwise_device_loop(x: torch.Tensor) -> torch.Tensor:
     for tile_n in hl.tile(n):
         for tile_m in hl.tile(m):
             out[tile_n, tile_m] = torch.sigmoid(x[tile_n, tile_m] + 1)
+    return out
+
+
+global_tensor = torch.randn([512], device=DEVICE)
+global_float = 0.5
+
+
+@helion.kernel
+def use_globals(a):
+    out = empty_like(a)
+    for tile0, tile1 in hl.tile(out.size()):
+        out[tile0, tile1] = (
+            torch.sin(torch.add(a[tile0, tile1], global_tensor[None, tile1]))
+            + global_float
+        )
     return out

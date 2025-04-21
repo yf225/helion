@@ -3,7 +3,14 @@ from __future__ import annotations
 import dataclasses
 from typing import TYPE_CHECKING
 
+from torch._dynamo.source import AttrSource
+from torch._dynamo.source import GetItemSource
+from torch._dynamo.source import GlobalSource
+from torch._dynamo.source import LocalSource
+
 if TYPE_CHECKING:
+    from torch._guards import Source
+
     from .host_function import HostFunction
     from .source_location import SourceLocation
 
@@ -15,6 +22,22 @@ class Origin:
     def is_host(self) -> bool:
         """
         Check if the origin is a host.
+        """
+        return False
+
+    def is_global(self) -> bool:
+        """
+        Check if the origin is a global variable.
+
+        :return: True if the origin is from a global variable, False otherwise.
+        """
+        return False
+
+    def is_closure(self) -> bool:
+        """
+        Check if the origin is a closure.
+
+        :return: True if the origin is from a closure, False otherwise.
         """
         return False
 
@@ -50,6 +73,10 @@ class Origin:
         """
         raise NotImplementedError(type(self).__name__)
 
+    def to_source(self) -> Source:
+        """Convert to a PyTorch source object."""
+        raise NotImplementedError(type(self).__name__)
+
 
 @dataclasses.dataclass
 class HostOrigin(Origin):
@@ -75,19 +102,29 @@ class NameOrigin(HostOrigin):
 
 
 class BuiltinOrigin(NameOrigin):
-    pass
+    def to_source(self) -> Source:
+        return GlobalSource(self.name)
 
 
 class GlobalOrigin(NameOrigin):
-    pass
+    def is_global(self) -> bool:
+        return True
+
+    def to_source(self) -> Source:
+        return GlobalSource(self.name)
 
 
 class ClosureOrigin(NameOrigin):
-    pass
+    def is_closure(self) -> bool:
+        return True
+
+    def to_source(self) -> Source:
+        return LocalSource(self.name)
 
 
 class ArgumentOrigin(NameOrigin):
-    pass
+    def to_source(self) -> Source:
+        return LocalSource(self.name, is_input=True)
 
 
 @dataclasses.dataclass
@@ -99,6 +136,12 @@ class WrappedOrigin(Origin):
 
     def is_host(self) -> bool:
         return self.value.is_host()
+
+    def is_global(self) -> bool:
+        return self.value.is_global()
+
+    def is_closure(self) -> bool:
+        return self.value.is_closure()
 
     def depth(self) -> int:
         return 1 + self.value.depth()
@@ -114,6 +157,9 @@ class AttributeOrigin(WrappedOrigin):
     def suggest_var_name(self) -> str:
         return f"{self.value.suggest_var_name()}_attr_{self.key}"
 
+    def to_source(self) -> Source:
+        return AttrSource(self.value.to_source(), self.key)
+
 
 @dataclasses.dataclass
 class GetItemOrigin(WrappedOrigin):
@@ -122,6 +168,9 @@ class GetItemOrigin(WrappedOrigin):
 
     def suggest_var_name(self) -> str:
         return f"{self.value.suggest_var_name()}_item_{self.key}"
+
+    def to_source(self) -> Source:
+        return GetItemSource(self.value.to_source(), self.key)
 
 
 @dataclasses.dataclass
@@ -133,6 +182,9 @@ class TensorSizeOrigin(WrappedOrigin):
 
     def suggest_var_name(self) -> str:
         return f"{self.value.suggest_var_name()}_size_{self.key}"
+
+    def to_source(self) -> Source:
+        return GetItemSource(AttrSource(self.value.to_source(), "shape"), self.key)
 
 
 @dataclasses.dataclass
