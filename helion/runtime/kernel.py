@@ -31,7 +31,13 @@ if TYPE_CHECKING:
 
 
 class Kernel:
-    def __init__(self, fn: types.FunctionType, settings: Settings | None) -> None:
+    def __init__(
+        self,
+        fn: types.FunctionType,
+        *,
+        configs: list[ConfigLike] | None = None,
+        settings: Settings | None,
+    ) -> None:
         """
         Initialize the Kernel object.  This is typically called from the `@helion.kernel` decorator.
 
@@ -44,6 +50,7 @@ class Kernel:
         self.fn = fn
         self.signature: inspect.Signature = inspect.signature(fn)
         self.settings: Settings = settings or Settings.default()
+        self.configs: list[Config] = [*map(Config, configs or ())]
         # pyre-fixme[11]: BoundKernel undefined?
         self._bound_kernels: dict[Hashable, BoundKernel] = {}
         if any(
@@ -178,8 +185,8 @@ class BoundKernel:
                 for name, arg in zip(self.kernel.signature.parameters, args)
             ]
             self.host_fn: HostFunction = HostFunction(self.kernel.fn, self.fake_args)
-        if (configs := self.settings.configs) is not None and len(configs) == 1:
-            self.set_config(configs[0])
+        if len(kernel.configs) == 1:
+            self.set_config(kernel.configs[0])
 
     @property
     def settings(self) -> Settings:
@@ -200,6 +207,16 @@ class BoundKernel:
         :rtype: ConfigSpec
         """
         return self.env.config_spec
+
+    @property
+    def configs(self) -> list[Config]:
+        """
+        Alias for `self.kernel.configs`.
+
+        :return: The list of configurations.
+        :rtype: list[Config]
+        """
+        return self.kernel.configs
 
     def to_triton_code(self, config: ConfigLike) -> str:
         """
@@ -261,12 +278,10 @@ class BoundKernel:
         :return: The best configuration found during autotuning.
         :rtype: Config
         """
-        if self.settings.configs:
+        if self.kernel.configs:
             from ..autotuner import FiniteSearch
 
-            config = FiniteSearch(
-                self, args, [*map(Config, self.settings.configs)]
-            ).autotune()
+            config = FiniteSearch(self, args, self.configs).autotune()
         else:
             from ..autotuner import DifferentialEvolutionSearch
 
@@ -308,32 +323,58 @@ class BoundKernel:
 
 
 @overload
-def kernel(fn: Callable[..., object], **settings: object) -> Kernel: ...
+def kernel(
+    fn: Callable[..., object],
+    *,
+    config: ConfigLike | None = None,
+    configs: list[ConfigLike] | None = None,
+    **settings: object,
+) -> Kernel: ...
 
 
 @overload
 def kernel(
-    fn: None = None, **settings: object
+    fn: None = None,
+    *,
+    config: ConfigLike | None = None,
+    configs: list[ConfigLike] | None = None,
+    **settings: object,
 ) -> Callable[[Callable[..., object]], Kernel]: ...
 
 
-def kernel(fn: Callable[..., object] | None = None, **settings: object) -> object:
+def kernel(
+    fn: Callable[..., object] | None = None,
+    *,
+    config: ConfigLike | None = None,
+    configs: list[ConfigLike] | None = None,
+    **settings: object,
+) -> object:
     """
     Decorator to create a Kernel object from a Python function.
 
     :param fn: The function to be wrapped by the Kernel. If None, a decorator is returned.
+    :type fn: Callable[..., object] | None
+    :param config: A single configuration to use for the kernel.
+    :param configs: A list of configurations to use for the kernel.  Can only specify one of config or configs.
     :param settings: Keyword arguments representing settings for the Kernel.
                     Can also use settings=Settings(...) to pass a Settings object directly.
     :return: A Kernel object or a decorator that returns a Kernel object.
     """
-    if fn is None:
-        return functools.partial(kernel, **settings)
-    if settings_obj := settings.pop("settings", None):
-        assert len(settings) == 0, "settings must be the only keyword argument"
+    if config is not None:
+        assert not configs, "Cannot specify both config and configs"
+        configs = [config]
+    elif configs is None:
+        configs = []
+
+    if settings_obj := settings.get("settings"):
+        assert len(settings) == 1, "settings must be the only keyword argument"
         assert isinstance(settings_obj, Settings), "settings must be a Settings object"
     else:
         settings_obj = Settings(**settings)
-    return Kernel(fn, settings_obj)
+
+    if fn is None:
+        return functools.partial(kernel, configs=configs, settings=settings_obj)
+    return Kernel(fn, configs=configs, settings=settings_obj)
 
 
 def _tensor_key(fn: Kernel, obj: torch.Tensor) -> Hashable:

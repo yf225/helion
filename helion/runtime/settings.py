@@ -12,7 +12,6 @@ import torch
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
-    from helion import Config
     from helion import exc
 
     class _TLS(Protocol):
@@ -63,7 +62,6 @@ def set_default_settings(settings: Settings) -> AbstractContextManager[None, Non
 @dataclasses.dataclass
 class _Settings:
     # see __slots__ below for the doc strings that show up in help(Settings)
-    configs: list[Config | dict[str, object]] | None = None
     ignore_warnings: list[type[exc.BaseWarning]] = dataclasses.field(
         default_factory=list
     )
@@ -80,7 +78,6 @@ class Settings(_Settings):
     """
 
     __slots__: dict[str, str] = {
-        "configs": "Optional list of Config objects to search in autotuning.",
         "ignore_warnings": "Subtypes of exc.BaseWarning to ignore when compiling.",
         "index_dtype": "The dtype to use for index variables. Default is torch.int32.",
         "dot_precision": "Precision for dot products, see `triton.language.dot`. Can be 'tf32', 'tf32x3', or 'ieee'.",
@@ -96,11 +93,6 @@ class Settings(_Settings):
 
         :param settings: Keyword arguments representing various settings.
         """
-        if config := settings.pop("config", None):
-            assert "configs" not in settings, (
-                "Cannot specify both 'config' and 'configs'"
-            )
-            settings["configs"] = [config]
         if defaults := getattr(_tls, "default_settings", None):
             settings = {**defaults.to_dict(), **settings}
         # pyre-ignore[6]

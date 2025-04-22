@@ -42,7 +42,7 @@ def autotune(n: int, k: int, m: int) -> None:
     y = torch.randn([k, m], device="cuda", dtype=torch.float16)
     bias = torch.randn([1, m], device="cuda", dtype=torch.float16)
     args = (x, y, lambda acc, tile: torch.relu(acc + bias[tile]))
-    matmul_with_epilogue.settings.configs = None
+    matmul_with_epilogue.configs.clear()
     best_config = matmul_with_epilogue.autotune(args)
     print(f"Best config: {best_config}")
     best_config.save("best_config.json")

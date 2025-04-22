@@ -3,12 +3,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .. import exc
-from ..runtime.config import Config
 from .base_search import BaseSearch
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from ..runtime.config import Config
     from ..runtime.kernel import BoundKernel
 
 
@@ -28,8 +28,8 @@ class FiniteSearch(BaseSearch):
     ) -> None:
         super().__init__(kernel, args)
         self.configs: list[Config] = [*(configs or ())]
-        if len(self.configs) == 0 and self.settings.configs:
-            self.configs.extend(map(Config, self.settings.configs))
+        if len(self.configs) == 0 and self.kernel.configs:
+            self.configs.extend(self.kernel.configs)
         if len(self.configs) < 2:
             raise exc.NotEnoughConfigs(len(self.configs))
 
