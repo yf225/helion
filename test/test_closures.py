@@ -39,6 +39,8 @@ class TestClosures(TestCase):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_helpers import math as tl_math
@@ -81,6 +83,8 @@ def use_globals(a):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -114,6 +118,8 @@ def sin_func_arg(a, fn):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -150,6 +156,8 @@ def sin_func_arg(a, fn):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -189,6 +197,8 @@ def sin_func_arg(a, fn):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -232,6 +242,8 @@ def sin_func_arg(a, fn):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_helpers import math as tl_math

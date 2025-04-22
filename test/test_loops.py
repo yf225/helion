@@ -39,6 +39,8 @@ class TestLoops(TestCase):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -78,6 +80,8 @@ def pointwise_device_loop(x: torch.Tensor):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -123,6 +127,8 @@ def device_loop_3d(x: torch.Tensor):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -168,6 +174,8 @@ def device_loop_3d(x: torch.Tensor):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -211,6 +219,8 @@ def device_loop_3d(x: torch.Tensor):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl

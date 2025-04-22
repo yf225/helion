@@ -6,7 +6,7 @@ import helion
 import helion.language as hl
 
 
-@helion.kernel
+@helion.kernel()
 def add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     # match pytorch broadcasting rules
     x, y = torch.broadcast_tensors(x, y)

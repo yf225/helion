@@ -168,7 +168,10 @@ class SubscriptIndexing(NamedTuple):
                 if isinstance(symbol, sympy.Symbol):
                     origin = HostFunction.current().symbol_to_origin.get(symbol.name)
                     if origin and isinstance(origin.origin, BlockSizeOrigin):
-                        output_size.append(k)
+                        if tensor.size(tensor.ndim - len(input_size) - 1) != 1:
+                            output_size.append(k)
+                        else:
+                            output_size.append(1)
             else:
                 raise exc.InvalidIndexingType(k)
         assert len(input_size) == 0, "invalid subscript"
@@ -198,8 +201,11 @@ class SubscriptIndexing(NamedTuple):
                 expand = tile_strategy.expand_str(output_size, output_idx)
                 if origin and isinstance(origin.origin, BlockSizeOrigin):
                     index_var = tile_strategy.index_var(origin.origin.block_size_idx)
+                    i = len(index_values)
                     index_values.append(f"({index_var}){expand}")
-                    if mask := tile_strategy.mask_var(origin.origin.block_size_idx):
+                    if (
+                        mask := tile_strategy.mask_var(origin.origin.block_size_idx)
+                    ) and fake_value.size(i) != 1:
                         mask_values.setdefault(f"({mask}){expand}")
                     output_idx += 1
                 else:
@@ -350,10 +356,14 @@ class BlockedSubscriptIndexing:
                 if isinstance(symbol, sympy.Symbol):
                     origin = HostFunction.current().symbol_to_origin.get(symbol.name)
                 if origin and isinstance(origin.origin, BlockSizeOrigin):
-                    res.offsets.append(
-                        tile_strategy.offset_var(origin.origin.block_size_idx)
-                    )
-                    res.block_shape.append(k)
+                    if fake_value.size(len(res.offsets)) != 1:
+                        res.offsets.append(
+                            tile_strategy.offset_var(origin.origin.block_size_idx)
+                        )
+                        res.block_shape.append(k)
+                    else:
+                        res.offsets.append("0")
+                        res.block_shape.append(1)
                 else:
                     res.offsets.append(state.device_function.literal_expr(k))
                     res.block_shape.append(1)

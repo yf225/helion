@@ -111,6 +111,26 @@ class Kernel:
         bound_args.apply_defaults()
         return tuple(bound_args.args)
 
+    def autotune(
+        self,
+        args: Sequence[object],
+        **options: object,
+    ) -> Config:
+        """
+        Perform autotuning to find the optimal configuration for
+        the kernel.  This uses the default setting, you can call
+        helion.autotune.* directly for more customization.
+
+        Mutates (the bound version of) self so that `__call__` will run the best config found.
+
+        :param args: Example arguments used for benchmarking during autotuning.
+        :type args: list[object]
+        :return: The best configuration found during autotuning.
+        :rtype: Config
+        """
+        args = self.normalize_args(*args)
+        return self.bind(args).autotune(args, **options)
+
     def __call__(self, *args: object, **kwargs: object) -> object:
         """
         Call the Kernel with the given arguments and keyword arguments.
@@ -236,7 +256,7 @@ class BoundKernel:
 
         Mutates self so that `__call__` will run the best config found.
 
-        :param args: Example arguments used for benchmarking durring autotuning.
+        :param args: Example arguments used for benchmarking during autotuning.
         :type args: list[object]
         :return: The best configuration found during autotuning.
         :rtype: Config

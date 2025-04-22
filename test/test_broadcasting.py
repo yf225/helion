@@ -52,6 +52,8 @@ class TestBroadcasting(TestCase):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -90,6 +92,8 @@ def broadcast_fn(a, b):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -130,6 +134,8 @@ def broadcast_fn(a, b):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -168,6 +174,8 @@ def broadcast_fn(a, b):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -207,6 +215,8 @@ def broadcast_fn(a, b):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -257,6 +267,8 @@ def broadcast_fn(a, b):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl

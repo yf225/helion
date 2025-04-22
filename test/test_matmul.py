@@ -81,6 +81,8 @@ class TestMatmul(TestCase):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -137,6 +139,8 @@ def matmul_without_addmm(x: torch.Tensor, y: torch.Tensor):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -188,6 +192,8 @@ def matmul(x: torch.Tensor, y: torch.Tensor):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -244,6 +250,8 @@ def matmul_with_addmm(x: torch.Tensor, y: torch.Tensor):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -294,6 +302,8 @@ def matmul(x: torch.Tensor, y: torch.Tensor):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -346,6 +356,8 @@ def matmul(x: torch.Tensor, y: torch.Tensor):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -400,6 +412,8 @@ def matmul_static_shapes(x: torch.Tensor, y: torch.Tensor):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl

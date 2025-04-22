@@ -24,6 +24,8 @@ class TestGenerateAst(TestCase):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -57,6 +59,8 @@ def add(x, y):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -92,6 +96,8 @@ def add(x, y):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -125,6 +131,8 @@ def add(x, y):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -161,6 +169,8 @@ def add(x, y):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -206,6 +216,8 @@ def add(x, y):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -242,6 +254,8 @@ def add(x, y):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -289,6 +303,8 @@ def add(x, y):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -336,6 +352,8 @@ def add(x, y):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -386,6 +404,8 @@ def add(x, y):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -433,6 +453,8 @@ def add(x, y):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -470,6 +492,8 @@ def torch_ops_pointwise(x, y):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -511,6 +535,8 @@ def hl_zeros_usage(x: torch.Tensor):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
@@ -546,6 +572,8 @@ def hl_full_usage(x: torch.Tensor):
         self.assertExpectedInline(
             code,
             """\
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl

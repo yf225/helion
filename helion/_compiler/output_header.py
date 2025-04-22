@@ -17,6 +17,7 @@ library_imports: dict[str, str] = {
     "hl": "import helion.language as hl",
     "triton": "import triton",
     "tl": "import triton.language as tl",
+    "triton_helpers": "from torch._inductor.runtime import triton_helpers",
     "tl_math": "from torch._inductor.runtime.triton_helpers import math as tl_math",
     "TensorDescriptor": "from triton.tools.experimental_descriptor import TensorDescriptor",
 }
@@ -40,7 +41,7 @@ def get_needed_imports(root: ast.AST) -> str:
     """
     rw = ReadWrites.from_ast(root)
     result = [library_imports[name] for name in library_imports if name in rw.reads]
-    return "\n".join(result) + "\n\n"
+    return f"from __future__ import annotations\n\n{'\n'.join(result)}\n\n"
 
 
 def assert_no_conflicts(fn: FunctionType) -> None:
