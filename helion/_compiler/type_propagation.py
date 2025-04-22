@@ -16,6 +16,7 @@ from typing import TypeVar
 
 import sympy
 import torch
+from torch.fx.experimental import proxy_tensor
 
 from .. import exc
 from ..autotuner.config_spec import BlockSizeSpec
@@ -33,7 +34,6 @@ from .tile_index_proxy import TileIndexProxy
 from .variable_origin import ArgumentOrigin
 from .variable_origin import AttributeOrigin
 from .variable_origin import BuiltinOrigin
-from .variable_origin import ClosureOrigin
 from .variable_origin import DeviceOrigin
 from .variable_origin import GetItemOrigin
 from .variable_origin import GlobalOrigin
@@ -92,14 +92,7 @@ class GlobalScope(Scope):
                 value,
                 (types.ModuleType, types.FunctionType, types.BuiltinFunctionType),
             ):
-                value = CompileEnvironment.current().to_fake(value, origin.to_source())
-                if isinstance(value, torch.Tensor):
-                    self.function.tensor_to_origin[value] = origin
-                elif isinstance(value, (torch.SymInt, torch.SymFloat, torch.SymBool)):
-                    if isinstance(symbol := value._sympy_(), sympy.Symbol):
-                        self.function.symbol_to_origin[symbol.name] = SymbolOrigin(
-                            origin
-                        )
+                value = self.function.register_fake(value, origin)
         return TypeInfo.from_example(value, origin)
 
     def set(self, name: str, type_info: TypeInfo) -> NoReturn:
@@ -881,7 +874,15 @@ class TileIndexType(TypeInfo):
         self.block_size_idx = block_size_idx
 
     def proxy(self) -> object:
-        return TileIndexProxy(self.block_size_idx)
+        with proxy_tensor.disable_proxy_modes_tracing():
+            fake_mode = torch._C._unset_dispatch_mode(
+                torch._C._TorchDispatchModeKey.FAKE
+            )
+            try:
+                return TileIndexProxy(self.block_size_idx)
+            finally:
+                assert fake_mode is not None
+                torch._C._set_dispatch_mode(fake_mode)
 
     @staticmethod
     def allocate(
@@ -1923,17 +1924,7 @@ def propagate_types(func: HostFunction, fake_args: list[object]) -> None:
                 ArgumentOrigin(name=name, function=func),
             )
             local_scope.set(name, type_info)
-        closure = func.fn.__closure__ or ()
-        assert len(closure) == len(func.fn.__code__.co_freevars)
-        for name, cell in zip(func.fn.__code__.co_freevars, closure):
-            # TODO(jansel): auto-specialize
-            # TODO(jansel): ban closure writes
-            value = cell.cell_contents
-            type_info = TypeInfo.from_example(
-                value,
-                ClosureOrigin(name=name, function=func),
-            )
-            local_scope.set(name, type_info)
+        assert not func.fn.__closure__
         prop = TypePropagation(func, local_scope)
         for stmt in func.body:
             prop.visit(stmt)

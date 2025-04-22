@@ -133,7 +133,7 @@ class GenerateAST(NodeVisitor):
         assert isinstance(node, ExtendedAST)
         if isinstance(node.ctx, ast.Load) and node._type_info is not None:
             origin = node._type_info.origin
-            if origin.is_global() or origin.is_closure():
+            if origin.needs_rename():
                 # `x` => `_original_globals.x`
                 return expr_from_string(origin.host_str())
         return node

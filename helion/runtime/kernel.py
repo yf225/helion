@@ -3,12 +3,12 @@ from __future__ import annotations
 import ast
 import functools
 import inspect
+import types
 from typing import TYPE_CHECKING
 from typing import Callable
 from typing import overload
 
 import torch
-from torch._dynamo.source import LocalSource
 from torch._inductor.codecache import PyCodeCache
 
 from .. import exc
@@ -17,13 +17,13 @@ from .._compiler.generate_ast import generate_ast
 from .._compiler.host_function import HostFunction
 from .._compiler.output_header import assert_no_conflicts
 from .._compiler.output_header import get_needed_imports
+from .._compiler.variable_origin import ArgumentOrigin
 from .config import Config
 from .settings import Settings
 
 if TYPE_CHECKING:
     from collections.abc import Hashable
     from collections.abc import Sequence
-    import types
 
     from ..autotuner import ConfigSpec
 
@@ -154,7 +154,7 @@ class BoundKernel:
             assert len(args) == len(self.kernel.signature.parameters)
             self.fake_args: list[object] = [
                 # TODO(jansel): Support hl.constexpr
-                self.env.to_fake(arg, LocalSource(name))
+                self.env.to_fake(arg, ArgumentOrigin(name))
                 for name, arg in zip(self.kernel.signature.parameters, args)
             ]
             self.host_fn: HostFunction = HostFunction(self.kernel.fn, self.fake_args)
@@ -342,6 +342,15 @@ def _number_key(fn: Kernel, n: float | bool) -> object:
     return type(n)
 
 
+def _function_key(fn: Kernel, obj: types.FunctionType) -> object:
+    if obj.__closure__:
+        closures = [
+            fn._specialization_key(cell.cell_contents) for cell in obj.__closure__
+        ]
+        return (obj.__code__, *closures)
+    return obj.__code__
+
+
 _specialization_extractors: dict[type[object], Callable[[Kernel, object], Hashable]] = {
     torch.Tensor: _tensor_key,
     torch.nn.Parameter: _tensor_key,
@@ -356,6 +365,7 @@ _specialization_extractors: dict[type[object], Callable[[Kernel, object], Hashab
     dict: lambda fn, x: tuple(
         sorted((k, fn._specialization_key(v)) for k, v in x.items())
     ),
+    types.FunctionType: _function_key,
 }
 
 

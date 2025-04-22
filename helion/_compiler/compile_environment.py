@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import collections
 import threading
+import types
 import typing
 from typing import TYPE_CHECKING
 from typing import Protocol
@@ -15,6 +16,7 @@ from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from .error_reporting import ErrorReporting
 from .variable_origin import BlockSizeOrigin
+from .variable_origin import Origin
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -102,26 +104,32 @@ class CompileEnvironment:
         )
         return idx
 
-    def to_fake(self, obj: object, source: Source) -> object:
+    def to_fake(self, obj: object, origin: Origin) -> object:
         if isinstance(obj, torch.Tensor):
-            return self._to_fake_tensor(obj, source)
-        if self.settings.static_shapes:
-            if isinstance(obj, (int, float, bool)):
+            return self._to_fake_tensor(obj, origin.to_source())
+        if isinstance(obj, (bool, int, float)):
+            if self.settings.static_shapes:
                 return obj
-        else:
+            if isinstance(obj, bool):
+                with self.shape_env.ignore_fresh_unbacked_symbols():
+                    return self.shape_env.create_unbacked_symbool()
             if isinstance(obj, int):
                 with self.shape_env.ignore_fresh_unbacked_symbols():
                     return self.shape_env.create_unbacked_symint()
             if isinstance(obj, float):
                 with self.shape_env.ignore_fresh_unbacked_symbols():
                     return self.shape_env.create_unbacked_symfloat()
-            if isinstance(obj, bool):
-                with self.shape_env.ignore_fresh_unbacked_symbols():
-                    return self.shape_env.create_unbacked_symbool()
-        if isinstance(obj, (torch.dtype, torch.device)):
+        if isinstance(
+            obj,
+            (torch.dtype, torch.device, types.BuiltinFunctionType, types.ModuleType),
+        ):
             return obj
+        if isinstance(obj, types.FunctionType):
+            from .lift_closures import lift_closures
+
+            return lift_closures(obj, origin)
         # TODO(jansel): support other types of args
-        raise TypeError(f"unsupported argument type {type(obj)} ({source})")
+        raise TypeError(f"unsupported argument type {type(obj)} ({origin})")
 
     def _to_fake_tensor(self, tensor: torch.Tensor, source: Source) -> torch.Tensor:
         assert CompileEnvironment.current() is self

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     _T = TypeVar("_T")
 
 
-class TileIndexProxy:
+class TileIndexProxy(torch.Tensor):
     def __init__(self, block_size_index: int) -> None:
         super().__init__()
         self.block_size_index = block_size_index
@@ -29,13 +29,32 @@ class TileIndexProxy:
         args: tuple[object, ...] = (),
         kwargs: dict[str, object] | None = None,
     ) -> object:
+        from ..language.memory_ops import load
+        from ..language.memory_ops import store
+
         if func is torch.Tensor.__getitem__:
-            raise NotImplementedError  # TODO(jansel): implement this
+            if len(args) != 2 or kwargs:
+                raise exc.IncorrectTileUsage(func)
+            tensor, index = args
+            assert isinstance(tensor, torch.Tensor)
+            return load(tensor, cls.prepare_index(index))
         if func is torch.Tensor.__setitem__:
-            raise NotImplementedError  # TODO(jansel): implement this
+            if len(args) != 3 or kwargs:
+                raise exc.IncorrectTileUsage(func)
+            tensor, index, value = args
+            assert isinstance(tensor, torch.Tensor)
+            assert isinstance(value, torch.Tensor)
+            return store(tensor, cls.prepare_index(index), value)
         raise exc.IncorrectTileUsage(func)
 
-    def __repr__(self) -> str:
+    @staticmethod
+    def prepare_index(index: object) -> list[object]:
+        if isinstance(index, (list, tuple)):
+            return [*index]
+        assert isinstance(index, TileIndexProxy)
+        return [index]
+
+    def __repr__(self, tensor_contents: None = None) -> str:
         return f"TileIndexProxy({self.block_size_index!r})"
 
     @classmethod

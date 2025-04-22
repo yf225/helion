@@ -49,6 +49,14 @@ class ClosuresNotSupported(BaseError):
     message = "A closure ({0!r}) was found in the kernel. Closures are not supported."
 
 
+class ClosureMutation(BaseError):
+    message = "Closure mutation (of {0}) is not allowed in a function arg."
+
+
+class GlobalMutation(BaseError):
+    message = "Global mutation (of {0}) is not allowed in a function arg."
+
+
 class LoopFunctionNotInFor(BaseError):
     message = "{0} must be called from a for loop, e.g. `for ... in {0}(...):"
 

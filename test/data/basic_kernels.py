@@ -67,3 +67,7 @@ def use_globals(a):
             + global_float
         )
     return out
+
+
+def add_global_float(x, tile) -> torch.Tensor:
+    return x + global_float

@@ -23,7 +23,7 @@ class Origin:
         """
         Check if the origin is a host.
         """
-        return False
+        return issubclass(self.base_type(), HostOrigin)
 
     def is_global(self) -> bool:
         """
@@ -31,15 +31,15 @@ class Origin:
 
         :return: True if the origin is from a global variable, False otherwise.
         """
-        return False
+        return issubclass(self.base_type(), GlobalOrigin)
 
-    def is_closure(self) -> bool:
+    def is_argument(self) -> bool:
         """
-        Check if the origin is a closure.
+        Check if the origin is an argument.
 
-        :return: True if the origin is from a closure, False otherwise.
+        :return: True if the origin is from an argument, False otherwise.
         """
-        return False
+        return issubclass(self.base_type(), ArgumentOrigin)
 
     def is_device(self) -> bool:
         """
@@ -48,6 +48,22 @@ class Origin:
         :return: True if the origin is a device, False otherwise.
         """
         return not self.is_host()
+
+    def base_type(self) -> type[Origin]:
+        """
+        Get the base type of the origin, unwrapping things like attributes.
+
+        :return: The base type of the origin.
+        """
+        return type(self)
+
+    def needs_rename(self) -> bool:
+        """
+        Check if the origin needs to be renamed (globals and closures).
+
+        :return: True if the origin needs to be renamed, False otherwise.
+        """
+        return self.is_global()
 
     def depth(self) -> int:
         """
@@ -80,8 +96,7 @@ class Origin:
 
 @dataclasses.dataclass
 class HostOrigin(Origin):
-    def is_host(self) -> bool:
-        return True
+    pass
 
 
 @dataclasses.dataclass
@@ -107,19 +122,8 @@ class BuiltinOrigin(NameOrigin):
 
 
 class GlobalOrigin(NameOrigin):
-    def is_global(self) -> bool:
-        return True
-
     def to_source(self) -> Source:
         return GlobalSource(self.name)
-
-
-class ClosureOrigin(NameOrigin):
-    def is_closure(self) -> bool:
-        return True
-
-    def to_source(self) -> Source:
-        return LocalSource(self.name)
 
 
 class ArgumentOrigin(NameOrigin):
@@ -134,14 +138,11 @@ class WrappedOrigin(Origin):
     value: Origin
     key: int | str
 
-    def is_host(self) -> bool:
-        return self.value.is_host()
+    def base_type(self) -> type[Origin]:
+        return self.value.base_type()
 
-    def is_global(self) -> bool:
-        return self.value.is_global()
-
-    def is_closure(self) -> bool:
-        return self.value.is_closure()
+    def needs_rename(self) -> bool:
+        return self.value.needs_rename()
 
     def depth(self) -> int:
         return 1 + self.value.depth()
@@ -185,6 +186,26 @@ class TensorSizeOrigin(WrappedOrigin):
 
     def to_source(self) -> Source:
         return GetItemSource(AttrSource(self.value.to_source(), "shape"), self.key)
+
+
+@dataclasses.dataclass
+class ClosureOrigin(WrappedOrigin):
+    key: int
+
+    def needs_rename(self) -> bool:
+        return True
+
+    def host_str(self) -> str:
+        return f"{self.value.host_str()}.__closure__[{self.key!r}].cell_contents"
+
+    def suggest_var_name(self) -> str:
+        return f"{self.value.suggest_var_name()}_closure_{self.key}"
+
+    def to_source(self) -> Source:
+        return AttrSource(
+            GetItemSource(AttrSource(self.value.to_source(), "__closure__"), self.key),
+            "cell_contents",
+        )
 
 
 @dataclasses.dataclass

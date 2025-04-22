@@ -41,8 +41,8 @@ tls: _TLS = typing.cast("_TLS", threading.local())
 class GlobalImport(NamedTuple):
     value: object
     module: str
+    alias: str
     member: str | None = None
-    alias: str | None = None
 
     def __repr__(self) -> str:
         return f"<GlobalImport '{self.codegen()}'>"
@@ -109,10 +109,38 @@ class HostFunction:
             self.global_imports[SOURCE_MODULE] = GlobalImport(
                 value=module,
                 module=module_name,
-                member=None,
                 alias=SOURCE_MODULE,
             )
         return AttributeOrigin(GlobalOrigin(SOURCE_MODULE), name)
+
+    def import_from_module(
+        self, module_scope: dict[str, object], name: str
+    ) -> AttributeOrigin:
+        if module_scope is self.fn.__globals__:
+            return self.global_scope_origin(name)
+        module_name = module_scope["__name__"]
+        assert isinstance(module_name, str)
+        if module_name not in self.global_imports:
+            module = sys.modules[module_name]
+            assert module.__dict__ is module_scope
+            alias = f"_global_source{len(self.global_imports)}"
+            self.global_imports[module_name] = GlobalImport(
+                value=module,
+                module=module_name,
+                alias=alias,
+            )
+        return AttributeOrigin(
+            GlobalOrigin(self.global_imports[module_name].alias), name
+        )
+
+    def register_fake(self, obj: object, origin: Origin) -> object:
+        value = CompileEnvironment.current().to_fake(obj, origin)
+        if isinstance(value, torch.Tensor):
+            self.tensor_to_origin[value] = origin
+        elif isinstance(value, (torch.SymInt, torch.SymFloat, torch.SymBool)):
+            if isinstance(symbol := value._sympy_(), sympy.Symbol):
+                self.symbol_to_origin[symbol.name] = SymbolOrigin(origin)
+        return value
 
     def __repr__(self) -> str:
         return f"<HostFunction {self.name}>"

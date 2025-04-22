@@ -33,6 +33,7 @@ from .inductor_lowering import CodegenState
 from .inductor_lowering import codegen_call_with_graph
 from .inductor_lowering import prepare_graph_lowerings
 from .source_location import current_location
+from .tile_index_proxy import TileIndexProxy
 from .type_propagation import IterType
 from .type_propagation import SequenceType
 from .type_propagation import TensorType
@@ -58,7 +59,7 @@ def _make_fx(fn: Callable[..., object], *args: object) -> torch.fx.GraphModule:
         default: object = proxy_tensor.no_default,
         transform: Callable[[object], object] = lambda x: x,
     ) -> object:
-        if isinstance(obj, torch.Tensor):
+        if isinstance(obj, torch.Tensor) and not isinstance(obj, TileIndexProxy):
             tracker = tracer.tensor_tracker
             if obj not in tracker:
                 origin = HostFunction.current().tensor_to_origin[obj]
@@ -426,7 +427,9 @@ class LiftTensorArgs:
     def __init__(self, values: dict[str, object]) -> None:
         self.flat_values, self.spec = pytree.tree_flatten(values)
         self.tensor_indices = [
-            i for i, v in enumerate(self.flat_values) if isinstance(v, torch.Tensor)
+            i
+            for i, v in enumerate(self.flat_values)
+            if isinstance(v, torch.Tensor) and not isinstance(v, TileIndexProxy)
         ]
 
     def unflatten(self) -> dict[str, object]:
