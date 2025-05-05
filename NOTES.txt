@@ -1,0 +1,1070 @@
+    codex
+    Below is a walk-through that ties the user-visible DSL (everything you import as  helion.language / hl) to the internal compiler pipeline, using the very small example
+    examples/add.py.
+
+    ────────────────────────────────────────────────────────
+
+        1. The example itself
+           ────────────────────────────────────────────────────────
+
+        @helion.kernel()                       # ➊
+        def add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+            x, y = torch.broadcast_tensors(x, y)
+            out = torch.empty(x.shape, dtype=torch.promote_types(x.dtype, y.dtype),
+                              device=x.device)
+            for tile in hl.tile(out.size()):   # ➋
+                out[tile] = x[tile] + y[tile]  # ➌
+            return out
+
+    • ➊  @helion.kernel marks a regular Python function as a Helion kernel;
+    • ➋  hl.tile creates a grid of tiles and turns the surrounding Python for
+         into a GPU loop;
+    • ➌  Plain tensor indexing (tensor[tile]) is overloaded so the RHS executes
+         on the device and the LHS writes back to global memory.
+
+    ────────────────────────────────────────────────────────
+    2. What happens when you call  add(x, y)
+    ────────────────────────────────────────────────────────
+    step-0)  helion.runtime.kernel.Kernel.call
+        • Normalises arguments, then forwards to a BoundKernel object
+          (one BoundKernel per argument signature).
+
+    step-1)  BoundKernel( … ) construction
+        • Creates a CompileEnvironment (file: _compiler/compile_environment.py)
+        • Converts the user tensors/ints/etc. to FakeTensors so shapes & dtypes
+          are known but no real GPU work is done.
+        • Wraps the Python source into a HostFunction object.
+
+    step-2)  HostFunction →  type propagation
+        • The source is parsed into an Extended AST (ast_extension.py).
+        • _compiler/type_propagation.py symbolically walks the tree producing a
+          TypeInfo for every node (e.g. “this expression is a
+          float16[SymN, SymM] tensor”, “this loop is a TileIndexType”, …).
+        • Errors such as type mismatches are collected here.
+
+    step-3)  HostFunction →  device IR
+        • The walker notices the for … in hl.tile() loop and tags it
+          LoopType.GRID (device side).
+        • _compiler/generate_ast.py splits host vs. device code and builds a
+          DeviceFunction containing the inner kernel.
+
+    step-4)  Lowering to real code
+        • _compiler/inductor_lowering.py turns DeviceFunction into a
+          Torch-Inductor FX graph, then into Triton/PTX.
+        • A tiny Python “glue” function (the host stub) that launches the Triton
+          kernel is also generated.  Both snippets are cached via
+          torch._inductor.codecache.PyCodeCache.
+
+    step-5)  Autotuning / Config selection (optional)
+        • A Config object encodes tile sizes, num-warps, etc.
+          If you call kernel.autotune(...), Helion explores many Configs and
+          picks the fastest; otherwise the default Config is used.
+
+    step-6)  Execution
+        • The compiled host stub is called with the real tensors,
+          launches the Triton kernel, and the user gets the result.
+
+    ────────────────────────────────────────────────────────
+    3. How the front-end (helion.language) is built
+    ────────────────────────────────────────────────────────
+    core file: helion/language/_decorators.py
+
+    Every DSL primitive (tile, zeros, reshape, …) is defined like
+
+        @_decorators.api(is_device_loop=True, tiles_as_sizes=True)  # runtime wrapper
+        def tile(sizes): ...
+        @_decorators.type_propagation(tile)                         # static typing
+        def _type_prop(sizes, *, origin): ...
+        @_decorators.codegen(tile)                                  # code-gen hook
+        def _codegen(state): ...
+
+    • api produces a thin Python wrapper that
+        – behaves just like the underlying torch op when no compilation is
+          active, but
+        – when Helion is compiling, intercepts the call and records it in the AST.
+
+    • type_propagation runs during step-2 above, supplying a TypeInfo
+      describing the result of the API call.
+
+    • codegen runs during step-3, turning the high-level op into lower-level
+      device-IR statements.
+
+    The same pattern appears in creation_ops.py, memory_ops.py, view_ops.py, …
+
+    ────────────────────────────────────────────────────────
+    4. Key compiler data structures
+    ────────────────────────────────────────────────────────
+    ExtendedAST          – ordinary ast.AST plus:
+                           • SourceLocation (for good error messages)
+                           • TypeInfo               (_type_info)
+                           • LoopType (HOST / GRID / DEVICE)
+
+    TypeInfo hierarchy   – TensorType, TileIndexType, UnknownType …
+                           They can be merged to model control-flow joins.
+
+    Device IR            –  _compiler/device_ir.py  holds a small IR that is easier
+                           to lower to Triton than Python AST.
+
+    Tile / BlockSize     –  _compiler/tile_strategy.py + config_spec.py
+                           Decide how the logical loop nest is tiled & mapped to
+                           CUDA blocks/threads; parameters become part of Config.
+
+    CompileEnvironment   –  per-compilation state:
+                           fake-tensor mode, ShapeEnv, collected errors,
+                           list of allocated block-sizes, etc.
+
+    ────────────────────────────────────────────────────────
+    5. Where to look in the repo
+    ────────────────────────────────────────────────────────
+    examples/                – small kernels (add, matmul, softmax, …)
+    helion/runtime/kernel.py – decorator + call path
+    helion/_compiler/
+        ast_extension.py     – ExtendedAST, LoopType
+        type_propagation.py  – abstract-interpretation pass
+        generate_ast.py      – host/device split & lowering hooks
+        device_ir.py         – final device IR
+        inductor_lowering.py – Triton / PTX code-generation
+    helion/language/         – user-facing DSL primitives
+    helion/autotuner/        – config search algorithms
+
+    ────────────────────────────────────────────────────────
+    6. Putting it together for the add() example
+    ────────────────────────────────────────────────────────
+
+        1. You call  add(x,y).
+        2. Helion compiles exactly once for the dtype/shape pair of (x,y).
+        3. The single `hl.tile(out.size())` becomes the GPU grid; its size is tuned
+           automatically (e.g. 128×1 threads, 32×32 tiles, …).
+        4. The body `out[tile] = x[tile] + y[tile]` is lowered to a Triton kernel that
+           • loads a tile of `x` and `y`,
+           • performs element-wise fp16 add,
+           • writes back into `out`.
+        5. Subsequent calls hit the cache, so you only pay the compilation cost once.
+
+    That end-to-end path—Python → AST → TypeInfo → Device-IR → Triton/PTX—is the
+    “language + compiler” story for every Helion kernel. Feel free to dive into
+    any of the files above; the comments are extensive and most pieces can be
+    tested in isolation with the fake-tensor mode.
+user
+why do we need HostFunction vs. device function separation?
+
+    Explaining function separation
+
+    The user wants to know why we separate HostFunction and DeviceFunction. In Helion, there's a distinction between host code and device code. HostFunction wraps user-facing
+     Python kernel functions, managing control logic, allocations, and device loops. It's crucial because it handles scope and type propagation. On the other hand,
+    DeviceFunction represents GPU kernel launches, requiring separation due to restrictions like static typing and specific compilation needs. This separation allows for more
+     efficient processing, enabling features like multiple kernels and nested loops.
+
+    Clarifying function responsibilities
+
+    HostFunction is responsible for managing variable origins, error reporting, and compiling environments, while maintaining clear separation from DeviceFunction. This
+    division improves compilation, supports the dynamic nature of Python, and accommodates the static typing of device code. When transitioning to device code, certain
+    variables are captured and passed as arguments. This structure allows for optimized code generation and facilitates autotuning for unique device configurations, while
+    also aiding in debugging by mapping Python lines to their origins.
+
+    codex
+    Helion is compiling a single Python function that actually contains two qualitatively different kinds of code:
+
+        1. “Normal” Python that can run on the CPU, allocate tensors, perform asserts, pick a kernel configuration, launch the GPU, etc.
+        2. Pure GPU-side code that must be turned into Triton / PTX, obeys static typing rules, cannot allocate Python objects, and will execute thousands of times in
+    parallel.
+
+    Trying to treat both kinds of statements as a single entity quickly becomes un-manageable, so the compiler draws an explicit line in the sand:
+
+    • HostFunction  (helion/_compiler/host_function.py)
+      – Owns the full Python source of the user-written kernel.
+      – Performs type-propagation over the entire AST so it knows what every
+        expression produces.
+      – Handles global-variable imports, fake-tensor wrapping, source-location
+        bookkeeping, error reporting, closure lifting, …
+      – Generates ordinary Python statements that will eventually launch one or
+        several GPU kernels.
+
+    • DeviceFunction  (helion/_compiler/device_function.py)
+      – Represents only the statements that run inside a LoopType.GRID /     LoopType.DEVICE region (e.g. the body of for tile in hl.tile(...)).
+      – Knows nothing about Python objects; arguments are already concrete
+        tensors/ints, control-flow is lowered, types are frozen.
+      – Can be cloned many times for different Configs during autotuning.
+      – Eventually lowered to Triton/PTX by inductor_lowering.py.
+
+    Why keeping them separate helps:
+
+        1. Clear legality rules
+           • Host side: any Python is fine.
+           • Device side: strict subset of ops; easy to statically reject illegal
+             constructs.
+        2. Independent transformation passes
+           • HostFunction: type-propagation, closure lifting, import resolution.
+           • DeviceFunction: dead-code elimination, vectorisation, tiling, Triton code-
+             gen.  Mixing them would interleave these passes and complicate reasoning.
+        3. Multiple device kernels per host function
+           A single Helion kernel can create several device kernels (e.g. different
+           reduction phases) or many variants during autotuning, while the surrounding
+           Python launcher stays intact.
+        4. Performance caching
+           HostFunction is built once per (argument signature); DeviceFunction objects
+           are cached per `(HostFunction, Config)`.  This lets Helion reuse expensive
+           analyses on the host side while experimenting quickly on the device side.
+        5. Better error messages
+           HostFunction tracks exact Python source locations and variable origins,
+           allowing the compiler to report “broadcast mismatch in add() line 7” even
+           though the error surfaced deep inside PTX generation.
+
+    Conceptually it’s the same “host vs. device” split you see in CUDA C
+    (.cu file + __global__ kernel) or in Triton (python + @triton.jit
+    function).  Helion just formalises the split as two explicit classes so each
+    half of the pipeline stays simple, testable, and reusable.
+user
+Device IR            –  _compiler/device_ir.py  holds a small IR that is easier
+                           to lower to Triton than Python AST.
+
+    Tile / BlockSize     –  _compiler/tile_strategy.py + config_spec.py
+                           Decide how the logical loop nest is tiled & mapped to
+                           CUDA blocks/threads; parameters become part of Config.
+
+can you dive more into these two parts
+
+    command
+
+    $ sed -n '1,160p' helion/_compiler/device_ir.py
+
+    command.stdout (code: 143, duration: 10s)
+
+
+    command
+
+    $ sed -n '1,400p' helion/_compiler/device_ir.py
+
+    command.stdout (code: 0, duration: 5.1s)
+
+    from __future__ import annotations
+
+    import ast
+    from collections.abc import Callable
+    ... (255 more lines)
+
+    command
+
+    $ sed -n '400,800p' helion/_compiler/device_ir.py
+
+    command.stdout (code: 0, duration: 4.1s)
+
+                        proxy_out,
+                        constant=None,
+                        tracer=tracer,
+                    )
+    ... (171 more lines)
+
+    command
+
+    $ sed -n '1,400p' helion/_compiler/tile_strategy.py
+
+    command.stdout (code: 0, duration: 4.1s)
+
+    from __future__ import annotations
+
+    import ast
+    import collections
+    ... (255 more lines)
+
+    Summarizing tile strategy
+
+    I'm noticing that the tile_strategy.py file is quite large. I see that the TileStrategy base class introduces new offset variables and related concepts. There's a variant
+     called FlattenedTileStrategy, which specializes in flattening shapes. Additionally, I spot other strategies, like TiledBlockStrategy, that seem significant as well. I
+    think I need to explore more lines to get a fuller understanding of how everything connects and operates within this class structure.
+
+    command
+
+    $ sed -n '400,800p' helion/_compiler/tile_strategy.py
+
+    command.stdout (code: 0, duration: 4.5s)
+
+            if block_size == 1 or env.known_multiple(numel, block_size):
+                self.mask_vars[block_idx] = None
+                return None
+            self.mask_vars[block_idx] = mask_var = self.fn.new_var(
+    ... (90 more lines)
+
+    command
+
+    $ sed -n '800,1200p' helion/_compiler/tile_strategy.py
+
+    command.stdout (code: 0, duration: 4.1s)
+
+
+    command
+
+    $ grep -n "def update_allow_flattened" -n helion/_compiler/tile_strategy.py
+
+    command.stdout (code: 0, duration: 5.2s)
+
+    275:    def update_allow_flattened(
+
+
+    command
+
+    $ sed -n '260,320p' helion/_compiler/tile_strategy.py
+
+    command.stdout (code: 0, duration: 5.3s)
+
+                            f"{offsets_var} = {lid} * {block_size_var} + tl.arange(0, {block_size_var}).to({dtype})"
+                        ),
+                        *statements,
+                    ]
+    ... (58 more lines)
+
+    command
+
+    $ sed -n '1,320p' helion/autotuner/config_spec.py
+
+    command.stdout (code: 0, duration: 7.3s)
+
+    from __future__ import annotations
+
+    import dataclasses
+    import functools
+    ... (255 more lines)
+
+    command
+
+    $ sed -n '1,240p' helion/_compiler/device_function.py
+
+    command.stdout (code: 0, duration: 7.5s)
+
+    from __future__ import annotations
+
+    import ast
+    from collections import defaultdict
+    ... (237 more lines)
+
+    command
+
+    $ sed -n '1,320p' helion/_compiler/tile_dispatch.py
+
+    command.stdout (code: 0, duration: 7.7s)
+
+    from __future__ import annotations
+
+    import collections
+    from typing import TYPE_CHECKING
+    ... (145 more lines)
+
+    command
+
+    $ sed -n '1,320p' helion/_compiler/reduction_strategy.py
+
+    command.stdout (code: 0, duration: 4.8s)
+
+    from __future__ import annotations
+
+    import ast
+    from typing import TYPE_CHECKING
+    ... (255 more lines)
+
+    codex
+    Below is a “deeper-dive” into the two subsystems you asked about.
+
+    ────────────────────────────────────────────────────────
+    A.  Device-IR  (helion/_compiler/device_ir.py)
+    ────────────────────────────────────────────────────────
+    High-level picture
+    • Purpose: isolate pure device computation from the Python AST and
+      represent it as a set of torch-fx GraphModules that are trivial to hand over
+      to Torch-Inductor / Triton.
+    • Why not keep the AST?  – FX already has decompositions, common-sub-expression
+      elimination, constant-prop, lowering helpers, etc.  Moving to FX early lets
+      Helion reuse that infra.
+
+        1. Building the IR
+
+       WalkHostAST                       (_compiler/device_ir.py: ~250)
+         └── visits each ast.For tagged LoopType.GRID
+             └── _make_fx( lambda: WalkDeviceAST.visit(loop) )
+                 – Traces the body with proxy-tensor; monkey-patches
+                   get_proxy_slot so that
+                      • tensors that originate on the host appear in the graph as
+                        a call to _host_tensor("x")
+                      • SymInts appear as _get_symnode("M")
+                 – The resulting GraphModule is added to a DeviceIR instance via
+                   add_root_graph / add_graph.
+
+       WalkDeviceAST                     (~500)
+         └── recurses inside the grid loop body
+             • Encounters inner for loops (LoopType.DEVICE)
+               ▶ Generates extra graphs (ForLoopGraphInfo /
+                 ReductionLoopGraphInfo) so the nested loop’s body can be
+                 vectorised/rolled separately.
+             • Encounters hl.load / hl.store / arithmetic etc. — all real tensor
+               ops — which are recorded as FX nodes.
+
+        1. IR container classes
+
+       DeviceIR                        – holds:
+         • graphs   : list[GraphInfo]         (GraphModule + metadata)
+         • root_id  : index of the graph that defines the whole kernel
+         • rolled_reductions : bookkeeping so that
+           a reduction graph can be cloned/rolled if the selected Config wants a
+           looped-vs-persistent variant.
+
+       GraphInfo hierarchy
+         • RootGraphInfo
+         • ForLoopGraphInfo        (edges back to tile indices)
+         • ReductionLoopGraphInfo  (same + reduction-specific data)
+
+        1. Access from later passes
+
+       generate_ast.py needs the “best” device graph for the chosen Config:
+           graph = device_ir.get_root(config)
+       It calls inductor_lowering.codegen_call_with_graph( … ) which finally
+       emits Triton kernels.
+
+        1. Reduction rolling (advanced)
+
+       build_rolled_reductions() can clone a reduction graph so that, e.g.,
+       sum over an  N×K  tile becomes a first pass that reduces K→block_size and
+       a second rolled pass that reduces the remainder.  Whether the rolled graph
+       is used is decided at get_root(config) time.
+
+    ────────────────────────────────────────────────────────
+    B.  Tile / Block-size system
+        (tile_strategy.py  +  autotuner/config_spec.py)
+    ────────────────────────────────────────────────────────
+    Goal: turn a logical iterator like
+
+        for tile_m, tile_n in hl.tile([M, N]):        # user space
+            …
+
+    into concrete CUDA concepts:
+
+        • grids / program_id()
+        • per-CTA/block sizes (powers-of-two, tuned)
+        • per-thread “inner” loops
+        • predication (mask) for edge tiles
+        • optional flattened 1-D vs N-D iteration
+        • optional looped or persistent reductions
+
+    Key data-flow
+
+        1. From `hl.tile()` to a BlockSizeSymbol
+
+       In type-propagation each size in hl.tile makes
+            CompileEnvironment.allocate_block_size(size)
+       which returns an index (0,1,2,…) and a sympy.Symbol that will live in the
+       shape-env (bs0, bs1, …).
+
+        1. CompileEnvironment.finalize_config_spec()
+
+       Looks at every tensor seen in the kernel and, via
+       TileStrategy.update_allow_flattened(), decides if some consecutive
+       dimensions may legally be collapsed into a single “flattened” loop.
+
+        1. ConfigSpec (autotuner/config_spec.py)
+
+       • Contains a BlockSizeSpec for each group of block sizes
+         (e.g. [TileH, TileW]).
+       • Each BlockSizeSpec records: min / max / power-of-two hints,
+         allow_flattened, allow_reorder, allow_l2_grouping, …
+       • default_config() or the autotuner produce an actual Config object with
+           - block_sizes   : 1-D ints  or  list[int]  per spec
+           - loop_orders   : permutation per spec (if allow_reorder)
+           - reduction_loops: choices for reduction dims
+           - num_warps/stages/indexing mode/…
+
+        1. TileStrategyDispatch (tile_dispatch.py)
+
+       • During DeviceFunction construction it converts
+         (spec, concrete block_size, loop_order) into an instance of a concrete
+         TileStrategy subclass for every block index.
+
+         Classes:
+           FlattenedTileStrategy    – treats a contiguous group as 1-D
+           NDTileStrategy           – classic nested loops
+           PersistentReductionStrategy / LoopedReductionStrategy (for reductions)
+
+       • Keeps a map  block_index → strategy  so later passes can ask for
+         offset/index/mask variables by index.
+
+        1. TileStrategy (tile_strategy.py) interface
+
+       offset_var(idx)        – expression giving the starting index of the tile
+       index_var(idx)         – vector of thread indices inside the tile
+       mask_var(idx)          – optional predication var for boundary tiles
+       block_size_var(idx)    – constexpr or runtime variable containing the size
+       codegen_grid(state)    – emit Triton code that launches the grid
+       codegen_device_loop(state) – emit the inner loop (for lid in …) used when
+                                    a tile appears inside another tile.
+
+       Example (FlattenedTileStrategy.codegen_grid):
+           • declares
+               offsets = pid0 * BLOCK + tl.arange(0, BLOCK)
+             where  pid0 = tl.program_id(0)
+           • converts that linear index back to multi-dim indices with % / //
+           • sets device_function.grid_expr so GenerateAST can insert
+               tl.num_programs = ceil_div(total_numel, BLOCK)
+
+        1. Interaction with DeviceFunction / Code-gen
+
+       • When GenerateAST hits the outer tile loop it calls
+           tile_strategy_dispatch.codegen_grid(state, [idx0, idx1])
+         which inserts the pid/arange/mask logic and records the grid expression.
+
+       • When it sees an inner tile loop it calls
+           codegen_device_loop             and gets back a DeviceLoopState whose
+         for_node plus pre/post snippets are spliced into the AST.
+
+       • All “shape strings” that show up in later code (e.g. tl.reshape) go
+         through tile_strategy_dispatch.shape_str / expand_str so they expand
+         SymInt symbols into expressions that mention block_size_var(idx).
+
+    ────────────────────────────────────────────────────────
+    Putting the two pieces together
+    ────────────────────────────────────────────────────────
+
+        1. While Helion is still in Python-AST form, TileStrategy decides how to map
+           user loops to indices & masks, and inserts *placeholder* AST statements
+           that reference tl.program_id, tl.arange, etc.
+        2. Device_IR traces exactly those placeholder statements (plus
+           hl.load/store arithmetic) into an FX graph, so the mapping is now frozen
+           as ordinary tensor expressions.
+        3. inductor_lowering.py finally lowers the FX graph to Triton kernels,
+           where   block_size_var   becomes a `tl.constexpr` or runtime scalar,
+           mask_var                         becomes a `tl.where` predicate, etc.
+        4. The same HostFunction can be paired with many DeviceFunction variants
+           (different Configs) because BlockSizeSpec / TileStrategy parametrize their
+           code emission.  The autotuner just swaps the Config and asks
+           DeviceFunction to re-emit code; DeviceIR + inductor then produce kernels
+           specialised for each block size.
+
+    That division of labour keeps the code generators small:
+
+       TileStrategy      – all CUDA launch mechanics & index arithmetic
+       Device_IR / FX    – semantic ops on tensors
+       Inductor          – nitty-gritty PTX generation
+
+    and allows Helion to explore a large search-space of tilings while re-using
+    Torch-Inductor’s mature lowering backend.
+user
+1. While Helion is still in Python-AST form, TileStrategy decides how to map
+           user loops to indices & masks, and inserts *placeholder* AST statements
+           that reference tl.program_id, tl.arange, etc.
+        2. Device_IR traces exactly those placeholder statements (plus
+           hl.load/store arithmetic) into an FX graph, so the mapping is now frozen
+           as ordinary tensor expressions.
+        3. inductor_lowering.py finally lowers the FX graph to Triton kernels,
+           where   block_size_var   becomes a `tl.constexpr` or runtime scalar,
+           mask_var                         becomes a `tl.where` predicate, etc.
+
+This part is a little confusing - if placeholder AST statements already reference tl.program_id, tl.arange, etc. how are we still able to trace them into an FX graph? that
+feels like going from lower-level IR to higher-level IR (FX-IR)
+
+    codex
+    Think of the compilation stack as
+
+    Python source  →  Python objects executing under a tracer  →  FX graph
+    (we are still in Python land and everything is trace-able)
+    →  Inductor IR  →  Triton/PTX  →  GPU hardware
+
+    tl.program_id / tl.arange live in the Python Triton API; calling them is
+    not “already PTX”, it is just calling ordinary Python functions that return
+    either real tensors (if you run eagerly) or Proxy objects (if you run under a
+    tracer).  Therefore they can safely appear before the FX stage.
+
+    Step-by-step for a tile loop
+
+        1. TileStrategy writes Python-AST like
+
+               offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+               index   = offsets % total_numel
+               mask    = offsets < total_numel        # optional
+
+           At this point nothing has been executed, it is just synthetic AST that
+           will become the body of `DeviceFunction`.
+        2. `_make_fx(device_fn)` executes that *new* Python function under
+           `proxy_tensor.make_fx`.
+           • `tl.program_id` is called with no real data; it immediately returns a
+             Proxy object.
+           • `tl.arange` is called; because at least one of its arguments is a Proxy
+             (or a symbolic `torch.SymInt` that we patched to return a Proxy), it
+             also returns a Proxy.
+           • Arithmetic with those Proxies (`*`, `+`, `%`, `<`) yields more Proxies.
+           • Each such call is intercepted and recorded as a
+             `call_function(...)` node in the **FX** graph.
+
+           Result: the FX graph now contains nodes such as
+
+               %0 = call_function(tl.program_id, args=(0,), kwargs={})
+               %1 = call_function(tl.arange,     args=(0, BLOCK), kwargs={})
+               %2 = call_function(operator.mul, (%0, BLOCK), {})
+               %3 = call_function(operator.add, (%2, %1), {})
+               ...
+
+           Nothing is “lower” yet; it is only a symbolic graph that *mentions*
+           Triton helper functions.
+        3. `inductor_lowering.codegen_call_with_graph` looks at that FX graph.
+           Its lowering passes pattern-match the `tl.*` calls (plus loads/stores,
+           arith, reductions, …), fuse them, choose an indexing strategy, and finally
+           emit a Triton kernel.  At that moment the variables like `BLOCK` are
+           turned into
+
+           • `tl.constexpr` arguments (compile-time) **or**
+           • scalar kernel arguments (run-time)
+
+           and `mask` becomes a `tl.where` predicate inside the generated PTX.
+
+    So the “placeholder AST” step is not jumping directly to a lower-level IR;
+    it is merely preparing Python code that contains Triton helper calls.  Those
+    helpers are perfectly trace-able, which is why we can still go through the
+    FX stage before reaching real PTX.
+user
+Where does auto-tuning come in? Seems that at multiple points during the lowering process, there is opportunity to "choose the best config" among several config options (e.g.
+ for block size, memory layout, indexing strategy, etc.)
+
+    codex
+    Autotuning in Helion is a runtime loop that repeatedly asks
+    “ what if I build the kernel with this Config – how fast does it run?”
+    until it finds the fastest variant measured on-device.
+
+    Below is the end-to-end picture, showing
+
+    • where the tunable knobs are introduced,
+    • how a candidate Config affects every later compiler pass, and
+    • where the search algorithms live.
+
+    ────────────────────────────────────────────────────────
+
+        1. Collecting the search-space  (Compile-time, single pass)
+           ────────────────────────────────────────────────────────
+           Phase: type-propagation  (type_propagation.py)
+
+    • Every  hl.tile(…)  or  hl.reduction(…)  triggers
+
+          CompileEnvironment.allocate_block_size(size)
+
+      which creates a symbol bs0, bs1, … and a BlockSizeInfo entry.
+      Those entries are later grouped into BlockSizeSpec / ReductionLoopSpec
+      objects.
+
+    • After the whole AST is analysed,
+      CompileEnvironment.finalize_config_spec() builds a
+      ConfigSpec instance that contains all tunable dimensions for this kernel:
+
+       – One BlockSizeSpec per tiling level
+       – Optional LoopOrderSpec (if the kernel allows dimension re-ordering)
+       – One ReductionLoopSpec per reduction dimension that could be
+         “persistent” or “looped”
+       – Global knobs: num_warps, num_stages, indexing mode, L2 grouping, …
+
+    Nothing has been chosen yet; we only know what could be tuned.
+
+    ────────────────────────────────────────────────────────
+    2.  When you call  kernel.autotune(args…)
+    ────────────────────────────────────────────────────────
+    runtime/kernel.py :  BoundKernel.autotune()
+
+        if kernel.configs:                     # user passed explicit list
+                search = FiniteSearch(…)
+        else:   # default
+                search = DifferentialEvolutionSearch(…)
+        best = search.autotune()
+        self.set_config(best)                  # cache “winner”
+
+    The two shipped algorithms are:
+
+    • FiniteSearch                 – brute-force over an explicit list
+    • DifferentialEvolutionSearch  – population-based search (40×20 by default)
+
+    Both inherit from  autotuner.base_search.BaseSearch, which supplies
+
+        def benchmark(config):
+            fn = kernel.compile_config(config)   # = compile + cache
+            return do_bench(fn, args)
+
+    Benchmarking therefore includes the full compiler pipeline (but each
+    distinct Config is compiled at most once thanks to the cache).
+
+    ────────────────────────────────────────────────────────
+    3.  How a Config drives the compiler
+    ────────────────────────────────────────────────────────
+    compile_config(config) does:
+
+        1. DeviceFunction(config)                     ↑
+           └─ TileStrategyDispatch(config)            │
+           – decides Flattened vs ND tile,        │
+             block_size vars, masks, etc.         │
+        2. GenerateAST → placeholder tl.program_id    │
+        3. device_ir.get_root(config)                 │  rolled vs persistent
+        4. IndexingStrategy.select(config.indexing)   │
+        5. inductor_lowering … → Triton kernel        ↓
+
+    Every knob in the Config ends up in one of those steps:
+
+    block_sizes[]        → TileStrategy.{BLOCK_SIZE_VAR, masks, loops}
+    loop_orders[]        → permutation inside TileStrategy
+    reduction_loops[]    → choose between PersistentReductionStrategy
+                           and LoopedReductionStrategy
+    num_warps / stages   → passed straight to Triton’s @triton.jit
+    l2_grouping / yz     → ProgramID mapping in TileStrategy
+    indexing             → Pointer vs BlockPtr vs TensorDescriptor
+
+    Hence switching Config means regenerating the DeviceFunction (the FX graph
+    and the ensuing PTX can differ a lot), which is why we re-compile for each
+    candidate.
+
+    ────────────────────────────────────────────────────────
+    4.  Search-loop mechanics
+    ────────────────────────────────────────────────────────
+    BaseSearch.benchmark()
+
+        1. `kernel.compile_config(cfg)`            – builds/loads Python module
+        2. warm-up call                            – ensures CUDA kernel is JIT’d
+        3. triton.testing.do_bench()               – time the average execution
+
+    Results are cached:
+
+        BoundKernel._compile_cache : {Config → callable}
+        BaseSearch._benchmark_cache : {Config → seconds}
+
+    so later benchmarks of the same Config are free.
+
+    Population-based searches keep a population : list[PopulationMember]
+    (FlatConfig + performance) and call benchmark() only for new candidates.
+
+    ────────────────────────────────────────────────────────
+    5.  When autotuning finishes
+    ────────────────────────────────────────────────────────
+    • BoundKernel.set_config(best) picks the fastest Config and stores the
+      already-compiled callable in self._run, so subsequent kernel(x,y)
+      invocations jump straight to GPU with zero overhead.
+
+    • A summary is printed, e.g.
+
+        Autotuning complete in 12.3s after searching 87 configs.
+        One can hard-code the best config and skip autotuning with:
+            @helion.kernel(config={'block_sizes': [[64, 32], 32], 'num_warps': 8, …})
+
+    You can therefore:
+
+        * Rely on the default DE search (good for unknown shapes).
+        * Pass a *small* list of hand-picked configs via `@helion.kernel(config=[…])`
+          and let FiniteSearch time them.
+        * Drive the autotuner yourself by importing `helion.autotune.*` and plugging
+          in a custom search loop.
+
+    ────────────────────────────────────────────────────────
+    6.  Multiple “decision points”, single Config
+    ────────────────────────────────────────────────────────
+    It looks like there are several places where choices are made, but they all
+    pull values from one immutable Config object, so the optimiser’s job
+    reduces to: “find the best Config in ConfigSpec’s space”.  Every part of the
+    compiler consults that same Config, guaranteeing coherence between tiling,
+    indexing, reductions and launch parameters.
+
+Meeting with Jason (May 2, 2025):
+work towards unifying all jagged bmm variants into this dense_bmm impl first, and use the max approach (and handle it as a dense matrix with masking, note that you might need two tl.load statements one for the tensor elems one for the mask). In general, encourage users to treat jagged tensor ops as dense tensor ops when writing Helion kernels, and improve the compiler so that users don't need to think about jaggedness.
+separately, the `for bi in range(b)` could be useful, or the `block_size=1` (or =N in general for user overriding autotuner config) syntax which is generally useful
+break this down into smaller useful features and land them one by one.
+Try to avoid adding syntax that only runs under Helion compiler. The same Helion kernel code should run as-is under eager as well.
+
+user
+Is it true that:
+Stage 1 of compilation (config-less): Device-side FX IR is produced based on the kernel DSL (by taking the device-side code (is it everything under hl.tile()?) and passing it through Inductor decomposition),
+   and for control-flow each branch will be in a separate FX subgraph with call site from the main graph. And for persistent vs. looped reduction, both versions are in the combined set of FX graphs
+   and the right one will be chosen based on the config in Stage 2.
+Stage 2 of compilation (taking config into consideration): There is lowering for each subgraph from FX-IR to Inductor scheduler IR and then codegen. 
+
+    codex:
+    ────────────────────────────────────────────────────────
+    Quick legend of the main helpers you will see in the code
+    ────────────────────────────────────────────────────────
+    • hl.tile()               → turns a Python for into a DEVICE loop
+    • LoopType.GRID           → outer-most tile (kernel grid)
+    • LoopType.DEVICE         → nested tile (thread-internal loop)
+    • DeviceIR                → container of all FX graphs (config-agnostic)
+    • rolled_reductions       → map  “original graph ↔ rolled graph”
+    • GenerateAST             → produces the final host-side Python that launches
+                                Triton kernels and calls the FX graphs
+    • tile_strategy           → code-emits pid/arange/etc. after a Config is
+                                known
+
+    ────────────────────────────────────────────────────────
+    Stage 1 – config-agnostic collection phase  (file: _compiler/device_ir.py)
+    ────────────────────────────────────────────────────────
+
+        1. WalkHostAST looks for every `for ... in hl.tile(...)` whose
+           `LoopType == GRID`.  For each such loop it calls
+
+                _make_fx(lambda: WalkDeviceAST.visit(loop_body))
+
+           The lambda runs under `proxy_tensor.make_fx`, so *every Python op* that
+           executes inside the loop is traced into an FX graph **with all Inductor
+           decompositions already applied** (select_decomp_table()).
+        2. WalkDeviceAST
+           • Executes the body of the GRID loop and traces it.
+           • Every nested DEVICE loop (another `hl.tile` inside) is peeled into its
+             own FX sub-graph:
+
+                ┌─ root_graph ─ hl._for_loop( subgraph_idx, …) ──┐
+                │                                                │
+                └─────────────── FX subgraph #subgraph_idx ◀─────┘
+
+             This matches what you mentioned as “each branch in a separate graph”, but
+             today this mechanism is implemented **only for loops**.  Device-side
+             `if/else` is currently not supported (there is no `visit_If` in
+             WalkDeviceAST; a generic node would raise StatementNotSupported).
+        3. Persistent vs. looped reductions
+           `build_rolled_reductions()` clones each FX graph once more, using
+           `ReductionRoller`, so you get *two* graphs: the original (persistent) and
+           a “rolled” version that performs the inner‐dimension loop explicitly.
+           A ReductionLoopSpec is pushed into `env.config_spec` so the later Config
+           can choose `None` (=persistent) or an integer loop size (=looped).
+
+    Result of Stage 1:
+
+        DeviceIR {
+            graphs = [ root_graph_0, for_loop_1, reduction_loop_2, rolled_2, … ]
+            root_id = 0
+            rolled_reductions = list[RolledReductionInfo]
+        }
+
+    No Config has been consulted yet, therefore all possible variants live side
+    by side inside device_ir.
+
+    ────────────────────────────────────────────────────────
+    Stage 2 – apply a concrete Config and finish lowering
+    ────────────────────────────────────────────────────────
+    Entry point:  BoundKernel.to_triton_code(config)
+
+        1. `env.config_spec.normalize(config)` checks that the Config you pass in
+           has legal block_sizes / loop_orders / reduction_loops / indexing / …
+        2. `device_ir.get_root(config)`
+           • Looks at `config.reduction_loops[...]`
+           • If it is `None` → returns the *persistent* graph.
+           • Otherwise       → returns the *rolled* clone that matches the requested
+                           reduction dimension.
+           No further edits to any graph are made; we simply pick which pre-built
+           FX graph the host code should call.
+        3. `GenerateAST(host_fn, config)`
+           • Re-walks the original Python AST **but** this time asks
+             `tile_strategy_dispatch` (which has access to `config`) to emit:
+
+                tl.program_id, tl.arange, mask logic,
+                const-expr/block-size symbols, pointer-math with or without
+                TensorDescriptors, etc.
+
+           • For every “call graph N” that it encounters it emits
+
+                call_function(_for_loop, graphN, args…)
+
+             Those `_for_loop` calls are executed at run-time and invoke the already
+             lowered Triton kernel coming from graph N.
+        4. `inductor_lowering.codegen_call_with_graph`
+           – Takes a `graphN` produced in Stage 1
+           – Fetches the (already prepared) `GraphLowering` object created by
+             `prepare_graph_lowerings()` back in Stage 1
+           – Schedules it, lowers it to Triton IR and injects the kernel source into
+             the surrounding AST.  Here the Config’s numeric constants
+             (`block_size_var`, `num_warps`, …) have already been inserted as
+             `tl.constexpr` or scalar arguments by GenerateAST, so the Triton code
+             is completely concrete.
+        5. The final Python AST is unparsed, run through `PyCodeCache.load`, and the
+           compiled kernel is cached as  `BoundKernel._compile_cache[config]`.
+
+    ────────────────────────────────────────────────────────
+    What differs from your proposed summary?
+    ────────────────────────────────────────────────────────
+
+        1. “everything under hl.tile() goes to device”
+           • *Only* loops whose iterators are `hl.tile(...)` and whose `_loop_type`
+             is marked GRID or DEVICE are considered device code.  Ordinary `for
+             i in range(B)` that you write outside a tile loop remain host-side.
+        2. “control-flow branches in separate graphs”
+           • True for DEVICE `for` loops.
+           • Not yet implemented for `if/else`; an `if` inside a GRID or DEVICE loop
+             raises StatementNotSupported today.
+        3. “Stage 2 lowers FX → Inductor Scheduler IR”
+           • The bulk of Inductor’s *IR construction* is already executed in Stage 1
+             by `prepare_graph_lowerings()`.
+           • Stage 2 merely *executes* those pre-prepared lowerings when the chosen
+             FX graph is stitched into the Triton kernel.
+        4. Persistent vs. Looped reductions
+           • Both variants are built in Stage 1 (original graph + rolled clone).
+           • Stage 2 only **selects** which graph to call via
+             `device_ir.get_root(config)`; no on-the-fly transformation happens.
+
+    So the two-stage mental model is directionally correct, but the most
+    expensive lowering work (FX-to-Inductor-IR and graph cloning) is already done
+    up-front in the config-independent pass; the config-dependent pass just
+    selects graphs and exposes the chosen Config’s constants when emitting the
+    final Triton source.
+
+user
+• The bulk of Inductor’s IR construction is already executed in Stage 1
+  by prepare_graph_lowerings().
+• Stage 2 merely executes those pre-prepared lowerings when the chosen
+  FX graph is stitched into the Triton kernel.
+
+can you deep-dive into how this part works?
+
+    codex
+    Below is a “zoom-lens” view of the two functions that glue Helion and
+    Torch-Inductor together:
+
+        •  prepare_graph_lowerings()          (runs in Stage-1, config-agnostic)
+        •  codegen_call_with_graph()          (runs in Stage-2, after a Config
+                                               has been chosen)
+
+    I annotate the source paths so you can read side-by-side with
+    helion/_compiler/inductor_lowering.py.
+
+    ────────────────────────────────────────────────────────
+
+        1. Stage-1 :  prepare_graph_lowerings(gm)
+           ────────────────────────────────────────────────────────
+           file: inductor_lowering.py  lines ≈ 20-145
+
+    Goal: enrich every FX node with  node.meta["lowering"]  – an object that
+    knows how to turn that exact node into Triton AST later on.
+
+    Steps:
+
+    (1)  GraphLowering instance
+              graph_lowering = GraphLowering(gm, shape_env)      V.set_graph_handler(graph_lowering)     
+         GraphLowering is the core Inductor scheduler: it decides layouts, fuses
+         pointwise ops, chooses whether an op is Pointwise or Reduction, etc.
+         That logic runs NOW, once, with no Config.
+
+    (2)  Walk every node and call  prepare_node_lowering()
+
+         A. If the op is an hl.* API or an ATen op for which Helion already has a
+            handwritten lowering (see  aten_lowering_dispatch  and
+            APIFuncLowering) we simply store a small wrapper:
+
+                node.meta["lowering"] = APIFuncLowering(api_fn)
+
+         B. Otherwise we
+            ```
+            result = graph_lowering.call_function(node.target, *tensor_args)
+            result.realize()         # materialise a ComputedBuffer
+            ```
+            The call_function returns a TensorBox that wraps a ComputedBuffer
+            representing either
+
+                Pointwise   inner_fn(indices)  -> OpsValue
+                Reduction   inner_fn(idx, rdx) -> OpsValue
+
+            We then freeze that buffer and instantiate one of
+
+                PointwiseLowering(buffer, used_inputs)
+                ReductionLowering(buffer, used_inputs)
+
+            and stash it in  node.meta["lowering"].
+
+         C. If call_function created *more than one* ComputedBuffer, we also
+            create “extra” FX nodes ( `_inductor_lowering_extra` ) so that each
+            buffer has a unique node → lowering mapping.
+
+    Result after Stage-1:
+
+    • Every node knows how it will be lowered.
+    • Expensive scheduling/layout reasoning is finished.
+    • No Triton code has been produced yet; buffers merely hold symbolic
+      expressions (inner_fn) that still mention sympy Symbols such as
+      i0, rdx0, and block-size symbols bs0…
+
+    ────────────────────────────────────────────────────────
+    2.  Stage-2 :  codegen_call_with_graph(cg, gm, args)
+    ────────────────────────────────────────────────────────
+    file: inductor_lowering.py  lines ≈ 560-750
+
+    Called from GenerateAST when we need to splice an FX sub-graph into the
+    current DeviceFunction.  The chosen Config is already accessible via
+        cg.device_function.config
+    so tile_strategy / indexing_strategy are concrete.
+
+    (1) GraphInterpreter(gm, cg).run(*args)
+
+        GraphInterpreter subclasses torch.fx.Interpreter and overrides
+        run_node():
+
+            lowering = node.meta["lowering"]
+            result   = lowering.codegen(self, node)
+
+        where  lowering.codegen  is implemented by
+
+            • PointwiseLowering.codegen
+            • ReductionLowering.codegen
+            • APIFuncLowering.codegen
+            • LambdaLowering.codegen   (for simple ATen ops)
+
+    (2)  What PointwiseLowering.codegen does
+
+        a. install_kernel_handlers(cg, arg_map)
+           --------------------------------------------------------
+           with
+               V.set_ops_handler( GenerateASTFromInductor(...) )
+               V.set_kernel_handler( TritonKernel(...) )
+           --------------------------------------------------------
+           We temporarily replace Inductor’s OPS handler with a tiny adapter that
+           turns every OpsValue / tl.* call into **strings**, and immediately
+           asks `cg.lift(expr_from_string(...))` so they become AST nodes in the
+           current DeviceFunction.
+
+        b.  indices = [sympy.Symbol("i0"), …]
+
+            output_str = buffer.data.inner_fn(indices)   # executes NOW
+            (because the handler has been patched, the call returns a *string*
+             like `"tl.broadcast_to(X[i0, i1], [BLOCK])"`)
+
+            return expr_from_string(output_str)
+
+        The returned AST expr is then spliced into the surrounding code; if the
+        value is reused it will be assigned to  `v123 = <expr>`  so SSA is
+        preserved.
+
+    (3)  ReductionLowering.codegen adds one more layer:
+
+        • Calls buffer.inner_fn(...) to build the *elementwise* expression.
+        • Hands that expression to  strategy.codegen_reduction(...)
+          (PersistentReductionStrategy or LoopedReductionStrategy), which wraps
+          it in `tl.sum`, `tl.where(mask, …)`, reshapes, etc., using concrete
+          block-size vars that tile_strategy produced from the Config.
+
+    (4)  APIFuncLowering.codegen simply forwards to the hl.* primitive’s own
+         _codegen handler, but the CodegenState it passes in contains:
+
+            state.tile_strategy            # Config-specific offsets, masks, …
+            state.device_function.indexing # chosen pointer / block_ptr / desc
+            state.config                   # all other numeric knobs
+
+    That’s how Config-dependent information enters the picture after Inductor
+    has scheduled the graph.
+
+    ────────────────────────────────────────────────────────
+    3.  Key take-aways
+    ────────────────────────────────────────────────────────
+    • Stage-1  (prepare_graph_lowerings)
+          – runs GraphLowering once
+          – attaches a Lowering object to every node
+          – does not emit code.
+
+    • Stage-2  (GraphInterpreter + Lowering.codegen)
+          – revisits the same FX graph
+          – executes each Lowering with the current Config in scope
+          – emits tl.* / pointer math as AST that is immediately lifted into the
+            DeviceFunction being generated.
+
+    • Because the heavy scheduling is done only once, trying a new Config is
+      cheap: we just replay GraphInterpreter with a different
+      tile_strategy / indexing_strategy and ask each lowering object to print
+      its expression again.
+
+    • This design keeps the compile-cache coherent:
+
+            (HostFunction, FX-graph  set)    ← Stage-1 (Config-less)
+                                             ↙
+                Config A   → DeviceFunction A (Stage-2)  → cached Triton kernel
+                Config B   → DeviceFunction B (Stage-2)  → cached Triton kernel
+                …
+
+    Everything after Stage-1 is pure code-generation that can be repeated or
+    parallelised without paying another Inductor scheduling cost.
