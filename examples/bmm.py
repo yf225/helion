@@ -7,7 +7,7 @@ import helion.language as hl
 
 
 # static_shapes=True gives a performance boost for matmuls
-@helion.kernel(static_shapes=True, use_default_config=True)
+@helion.kernel(static_shapes=True)
 def bmm(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     # A: [B, M, K], B: [B, K, N], Out: [B, M, N]   # dense bmm
     b, m, k = A.size()

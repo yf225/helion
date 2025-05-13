@@ -584,8 +584,12 @@ def apply_dot_requirements(handler: CodegenHandler, node: torch.fx.Node) -> Lowe
     lproxy, rproxy = map_arg(node.args[-2:], lambda arg: arg.meta["val"])
     assert isinstance(lproxy, torch.Tensor)
     assert isinstance(rproxy, torch.Tensor)
-    n, k = lproxy.size()
-    _, m = rproxy.size()
+    lshape = lproxy.size()
+    rshape = rproxy.size()
+    # use last two dimensions for dot (supports 2D and batched 3D tensors)
+    n, k = lshape[-2], lshape[-1]
+    k2, m = rshape[-2], rshape[-1]
+    assert k == k2, f"Mismatched k dimensions for dot: {k} vs {k2}"
     a, b, c = min_dot_size(lproxy.device, lproxy.dtype, rproxy.dtype)
     env = CompileEnvironment.current()
     for shape, min_size in [(n, a), (k, b), (m, c)]:
