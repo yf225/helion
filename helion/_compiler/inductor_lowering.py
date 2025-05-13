@@ -624,6 +624,22 @@ def codegen_addmm(ctx: GraphInterpreter, node: torch.fx.Node) -> ast.AST:
         acc=acc,
     )
 
+# pyre-fixme[56]
+@register_lowering(torch.ops.aten.baddbmm.default, apply_dot_requirements)
+def codegen_baddbmm(ctx: GraphInterpreter, node: torch.fx.Node) -> ast.AST:
+    assert not node.kwargs, "baddbmm kwargs not supported"
+    acc, lhs, rhs = map_arg(node.args, lambda arg: ctx.env[arg])
+    assert isinstance(acc, ast.AST)
+    assert isinstance(lhs, ast.AST)
+    assert isinstance(rhs, ast.AST)
+    tf32 = CompileEnvironment.current().settings.dot_precision
+    return expr_from_string(
+        f"tl.dot(lhs, rhs, acc=acc, input_precision={tf32!r})",
+        lhs=lhs,
+        rhs=rhs,
+        acc=acc,
+    )
+
 
 class GenerateASTFromInductor(DefaultHandler):
     def __init__(self, cg: GenerateAST, input_name_lookup: dict[str, ast.AST]) -> None:
